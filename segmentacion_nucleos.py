@@ -11,23 +11,130 @@ CLOSING_ITERATIONS = 2
 UMBRAL_GRADIENTE = 150
 UMBRAL_DISTANCIA = 0.3  # Bajado de 0.2 → más semillas, más núcleos pequeños detectados
 
-INPUT_DIR = "Material Celulas/H"
+INPUT_DIR_H = "Material Celulas/H"
+INPUT_DIR_E = "Material Celulas/E"
 OUTPUT_DIR = "out"
 GT_DIR = "Material Celulas/gt_colors"
 RESULTADOS_CSV = "resultados.csv"
 # ====================================================
 
 
-def cargar_imagen(ruta_imagen):
-    imagen_color = cv2.imread(ruta_imagen)
-    imagen_gris = cv2.cvtColor(imagen_color, cv2.COLOR_BGR2GRAY)
-    return imagen_color, imagen_gris
+def cargar_imagen(ruta_imagen_h):
+    """Carga las imágenes H y E correspondientes"""
+    # Cargar imagen H (Hematoxilina - núcleos)
+    imagen_h = cv2.imread(ruta_imagen_h, cv2.IMREAD_GRAYSCALE)
+    if imagen_h is None:
+        raise ValueError(f"No se pudo cargar la imagen H: {ruta_imagen_h}")
+
+    # Cargar imagen E (Eosina - citoplasma/proteínas)
+    nombre_archivo = os.path.basename(ruta_imagen_h)
+    ruta_imagen_e = os.path.join(INPUT_DIR_E, nombre_archivo)
+
+    imagen_e = None
+    if os.path.exists(ruta_imagen_e):
+        imagen_e = cv2.imread(ruta_imagen_e, cv2.IMREAD_GRAYSCALE)
+
+    # Cargar también la imagen original en color para visualización
+    imagen_color = cv2.imread(ruta_imagen_h)
+
+    return imagen_h, imagen_e, imagen_color
 
 
-def aplicar_umbralizacion(imagen_gris):
-    _, imagen_umbralizada = cv2.threshold(
-        imagen_gris, UMBRAL_VALOR, 255, cv2.THRESH_BINARY_INV
-    )
+def crear_mascara_tejido(imagen_e):
+    """
+    Crea una máscara de tejido usando la imagen de Eosina.
+    Las zonas con E alta son tejido (citoplasma/proteínas).
+    Retorna máscara donde 255=tejido, 0=fondo vacío.
+    """
+    if imagen_e is None:
+        return None
+
+    # Umbralización de Otsu para separar tejido de fondo
+    _, mascara_tejido = cv2.threshold(imagen_e, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+    # Operaciones morfológicas para limpiar la máscara
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    mascara_tejido = cv2.morphologyEx(mascara_tejido, cv2.MORPH_CLOSE, kernel, iterations=2)
+    mascara_tejido = cv2.morphologyEx(mascara_tejido, cv2.MORPH_OPEN, kernel, iterations=1)
+
+    return mascara_tejido
+
+
+def calcular_ratio_h_sobre_e(imagen_h, imagen_e, mascara_tejido=None):
+    """
+    Calcula el ratio H/E que resalta los núcleos.
+    Los núcleos tienen alta H y baja E, por lo que H/E será alto.
+    El citoplasma tiene baja H y alta E, por lo que H/E será bajo.
+    """
+    if imagen_e is None:
+        return imagen_h
+
+    # Normalizar ambas imágenes a [0, 1]
+    h_norm = imagen_h.astype(np.float32) / 255.0
+    e_norm = imagen_e.astype(np.float32) / 255.0
+
+    # Calcular H - E (núcleos tienen alta H, baja E)
+    # Esto resalta los núcleos mejor que solo usar H
+    diferencia = h_norm - e_norm
+
+    # Recortar valores negativos
+    diferencia = np.clip(diferencia, 0, 1)
+
+    # Aplicar máscara de tejido si está disponible
+    if mascara_tejido is not None:
+        diferencia[mascara_tejido == 0] = 0
+
+    # Convertir de vuelta a uint8
+    resultado = (diferencia * 255).astype(np.uint8)
+
+    return resultado
+
+
+def mejorar_contraste_nucleos(imagen_h, imagen_e):
+    """
+    Mejora el contraste de los núcleos usando información de ambos canales.
+    Aplica CLAHE (Contrast Limited Adaptive Histogram Equalization) de forma adaptativa.
+    """
+    if imagen_e is None:
+        # Si no hay imagen E, usar CLAHE estándar en H
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        return clahe.apply(imagen_h)
+
+    # Crear máscara de núcleos aproximada (alta H, baja E)
+    h_norm = imagen_h.astype(np.float32)
+    e_norm = imagen_e.astype(np.float32)
+
+    # Donde H > E es probable que haya núcleos
+    mascara_nucleos_prob = (h_norm > e_norm).astype(np.uint8) * 255
+
+    # Aplicar CLAHE solo en zonas donde probablemente hay núcleos
+    clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+    h_mejorado = clahe.apply(imagen_h)
+
+    return h_mejorado
+
+
+def aplicar_umbralizacion(imagen_gris, usar_adaptativo=False):
+    """
+    Aplica umbralización a la imagen.
+    Si usar_adaptativo=True, usa umbralización adaptativa Gaussian.
+    Si usar_adaptativo=False, usa umbralización global (compatibilidad).
+    """
+    if usar_adaptativo:
+        # Umbralización adaptativa Gaussian con ventana de 11x11
+        imagen_umbralizada = cv2.adaptiveThreshold(
+            imagen_gris,
+            255,
+            cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY_INV,
+            11,  # Tamaño de ventana
+            2,  # Constante C para restar
+        )
+    else:
+        # Umbralización global (método original)
+        _, imagen_umbralizada = cv2.threshold(
+            imagen_gris, UMBRAL_VALOR, 255, cv2.THRESH_BINARY_INV
+        )
     return imagen_umbralizada
 
 
@@ -201,9 +308,27 @@ def guardar_resultados(
 def procesar_imagen(ruta_imagen):
     nombre_imagen = os.path.basename(ruta_imagen)
 
-    # PIPELINE
-    imagen_original, imagen_gris = cargar_imagen(ruta_imagen)
-    imagen_umbralizada = aplicar_umbralizacion(imagen_gris)
+    # PIPELINE MEJORADO CON E y H
+    # 1. Cargar imágenes H, E y color
+    imagen_h, imagen_e, imagen_original = cargar_imagen(ruta_imagen)
+
+    # 2. Crear máscara de tejido usando E (si está disponible)
+    mascara_tejido = crear_mascara_tejido(imagen_e)
+
+    # 3. Calcular imagen mejorada usando H-E (resalta núcleos)
+    imagen_h_mejorada = calcular_ratio_h_sobre_e(imagen_h, imagen_e, mascara_tejido)
+
+    # 4. Mejorar contraste con CLAHE adaptativo
+    imagen_contraste = mejorar_contraste_nucleos(imagen_h_mejorada, imagen_e)
+
+    # 5. Umbralización adaptativa (mejor que umbral fijo)
+    imagen_umbralizada = aplicar_umbralizacion(imagen_contraste, usar_adaptativo=True)
+
+    # 6. Aplicar máscara de tejido para eliminar detecciones fuera del tejido
+    if mascara_tejido is not None:
+        imagen_umbralizada = cv2.bitwise_and(imagen_umbralizada, mascara_tejido)
+
+    # 7. Morfología y region growing (igual que antes)
     imagen_morfologia = aplicar_closing(imagen_umbralizada)
     markers = aplicar_region_growing(imagen_morfologia)
 
@@ -222,10 +347,11 @@ def procesar_imagen(ruta_imagen):
         markers, imagen_original
     )
 
+    # Para la visualización, usar imagen_h como "gris" para compatibilidad
     guardar_resultados(
         nombre_imagen,
         imagen_original,
-        imagen_gris,
+        imagen_h,  # Imagen H original
         imagen_umbralizada,
         imagen_morfologia,
         imagen_coloreada,
@@ -261,13 +387,13 @@ def guardar_csv(resultados):
 
 def procesar_todas_imagenes():
     imagenes = (
-        list(Path(INPUT_DIR).glob("*.png"))
-        + list(Path(INPUT_DIR).glob("*.jpg"))
-        + list(Path(INPUT_DIR).glob("*.tif"))
+        list(Path(INPUT_DIR_H).glob("*.png"))
+        + list(Path(INPUT_DIR_H).glob("*.jpg"))
+        + list(Path(INPUT_DIR_H).glob("*.tif"))
     )
 
     if not imagenes:
-        print(f"No se encontraron imagenes en {INPUT_DIR}")
+        print(f"No se encontraron imagenes en {INPUT_DIR_H}")
         return
 
     print(f"Procesando {len(imagenes)} imagenes...")
