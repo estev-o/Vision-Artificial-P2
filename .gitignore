@@ -1,3 +1,9 @@
 /.venv
 /Material Celulas
 /historial_info
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+out/
