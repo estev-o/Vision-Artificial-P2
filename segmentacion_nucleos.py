@@ -5,11 +5,18 @@ import csv
 from pathlib import Path
 
 # ==================== PARÁMETROS ====================
-UMBRAL_VALOR = 110  # Valor de corte para la umbralización
-KERNEL_SIZE = 3
-CLOSING_ITERATIONS = 2
-UMBRAL_GRADIENTE = 150
-UMBRAL_DISTANCIA = 0.3  # Bajado de 0.2 → más semillas, más núcleos pequeños detectados
+UMBRAL_VALOR = 110  # Valor de corte para la umbralización (NO SE USA si UMBRAL_ADAPTATIVO=True)
+
+# PARÁMETROS V1.1
+UMBRAL_ADAPTATIVO = True  # Usar Otsu automático por imagen
+UMBRAL_LOCAL = True  # Umbralización adaptativa por regiones (después de Otsu global)
+BLOCK_SIZE = 51  # Tamaño de ventana para umbralización local (debe ser impar)
+C_CONSTANT = 2  # Constante restada al umbral local
+
+# PARÁMETROS V1.2 - WATERSHED (OPTIMIZADO)
+USAR_MORFOLOGIA = False  # V1.2: Morfología eliminada (molesta más que aporta)
+UMBRAL_DISTANCIA = 0.3  # Umbral para sure foreground - MÁS AGRESIVO (era 0.5)
+DILATACION_BACKGROUND = 2  # Iteraciones de dilatación para sure background - MENOS CONSERVADOR (era 3)
 
 INPUT_DIR = "Material Celulas/H"
 OUTPUT_DIR = "out"
@@ -25,71 +32,86 @@ def cargar_imagen(ruta_imagen):
 
 
 def aplicar_umbralizacion(imagen_gris):
-    _, imagen_umbralizada = cv2.threshold(
-        imagen_gris, UMBRAL_VALOR, 255, cv2.THRESH_BINARY_INV
-    )
-    return imagen_umbralizada
+    """
+    Umbralización adaptativa por imagen (Otsu) y opcionalmente por regiones (adaptiveThreshold)
+    Devuelve: (imagen_final, imagen_otsu, imagen_local)
+    """
+    if UMBRAL_ADAPTATIVO:
+        # 1. Otsu global: encuentra el mejor umbral automáticamente para ESTA imagen
+        _, imagen_otsu = cv2.threshold(
+            imagen_gris, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+        )
+        
+        # 2. Umbralización local: compensa variabilidad del fondo
+        if UMBRAL_LOCAL:
+            # Combinar Otsu + adaptiveThreshold para mejores resultados
+            imagen_local = cv2.adaptiveThreshold(
+                imagen_gris, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY_INV, BLOCK_SIZE, C_CONSTANT
+            )
+            # Combinar ambas: píxel es núcleo si CUALQUIERA lo detecta
+            imagen_combinada = cv2.bitwise_or(imagen_otsu, imagen_local)
+            return imagen_combinada, imagen_otsu, imagen_local
+        else:
+            return imagen_otsu, imagen_otsu, None
+    else:
+        # Umbralización fija (modo antiguo)
+        _, imagen_umbralizada = cv2.threshold(
+            imagen_gris, UMBRAL_VALOR, 255, cv2.THRESH_BINARY_INV
+        )
+        return imagen_umbralizada, imagen_umbralizada, None
 
 
-def aplicar_closing(imagen_binaria):
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (KERNEL_SIZE, KERNEL_SIZE))
-    imagen_closing = cv2.morphologyEx(
-        imagen_binaria, cv2.MORPH_CLOSE, kernel, iterations=CLOSING_ITERATIONS
-    )
-    return imagen_closing
-
-
-def aplicar_region_growing(imagen_binaria):
-    from collections import deque
-
-    # 1. DISTANCIA: Encontrar centros de núcleos
+def aplicar_watershed(imagen_binaria):
+    """
+    Algoritmo Watershed para segmentación de núcleos
+    
+    V1.2: Reemplaza Region Growing por Watershed
+    - Más robusto para separar núcleos tocándose
+    - No requiere control manual de gradiente
+    - Usa markers para guiar la inundación
+    """
+    # 1. TRANSFORMADA DE DISTANCIA: Encontrar centros de núcleos
     dist_transform = cv2.distanceTransform(imagen_binaria, cv2.DIST_L2, 5)
-
-    # 2. SEMILLAS: Centros seguros
+    
+    # 2. SURE FOREGROUND: Centros seguros (umbral más bajo = más semillas)
+    # OPTIMIZACIÓN: Umbral 0.3 en vez de 0.5 → detecta más núcleos pequeños/débiles
     _, sure_fg = cv2.threshold(
         dist_transform, UMBRAL_DISTANCIA * dist_transform.max(), 255, cv2.THRESH_BINARY
     )
     sure_fg = sure_fg.astype(np.uint8)
-
-    # 3. ETIQUETAR semillas
+    
+    # 3. SURE BACKGROUND: Región segura de fondo (dilatar menos = más margen)
+    # OPTIMIZACIÓN: 2 iteraciones en vez de 3 → región desconocida más grande
+    kernel = np.ones((3, 3), np.uint8)
+    sure_bg = cv2.dilate(imagen_binaria, kernel, iterations=DILATACION_BACKGROUND)
+    
+    # 4. REGIÓN DESCONOCIDA: Entre foreground y background
+    # Aquí es donde Watershed decide los bordes
+    sure_fg_int = sure_fg.astype(np.uint8)
+    unknown = cv2.subtract(sure_bg, sure_fg_int)
+    
+    # 5. ETIQUETAR REGIONES CONOCIDAS (semillas)
+    # Cada componente conectada en sure_fg = 1 semilla
     _, markers = cv2.connectedComponents(sure_fg)
-    markers = markers + 1  # Fondo=1, semillas=2,3,4...
-
-    # 4. GRADIENTE: Detectar bordes fuertes
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    gradiente = cv2.morphologyEx(imagen_binaria, cv2.MORPH_GRADIENT, kernel)
-
-    # 5. REGION GROWING: Expansión simultánea desde semillas
-    h, w = imagen_binaria.shape
-    cola = deque()
-
-    # Inicializar cola con todos los píxeles de las semillas
-    for y in range(h):
-        for x in range(w):
-            if markers[y, x] > 1:  # Es semilla (no fondo)
-                cola.append((y, x, markers[y, x]))
-
-    # Expansión BFS simultánea
-    vecinos = [(-1, 0), (1, 0), (0, -1), (0, 1)]  # 4-conectividad
-
-    while cola:
-        y, x, region_id = cola.popleft()
-
-        for dy, dx in vecinos:
-            ny, nx = y + dy, x + dx
-
-            # Verificar límites
-            if 0 <= ny < h and 0 <= nx < w:
-                # Solo expandir a píxeles de núcleo no asignados
-                if imagen_binaria[ny, nx] == 255 and markers[ny, nx] == 1:
-                    # Control por gradiente: no cruzar bordes fuertes
-                    if gradiente[ny, nx] < UMBRAL_GRADIENTE:
-                        markers[ny, nx] = region_id
-                        cola.append((ny, nx, region_id))
-
-    # Convertir fondo de 1 a 0
-    markers[markers == 1] = 0
-
+    
+    # 6. MARCAR FONDO COMO 1 (no 0, que Watershed usa para desconocido)
+    markers = markers + 1
+    
+    # 7. MARCAR REGIÓN DESCONOCIDA COMO 0
+    markers[unknown == 255] = 0
+    
+    # 8. APLICAR WATERSHED
+    # Necesita imagen en color (BGR) como referencia
+    imagen_color = cv2.cvtColor(imagen_binaria, cv2.COLOR_GRAY2BGR)
+    markers = cv2.watershed(imagen_color, markers)
+    
+    # 9. LIMPIAR MARKERS
+    # Watershed marca bordes con -1, convertir fondo (1) a 0
+    markers[markers == -1] = 0  # Bordes → fondo
+    markers[markers == 1] = 0   # Fondo original → 0
+    # Ahora: 0=fondo, 2,3,4,...=núcleos
+    
     return markers
 
 
@@ -104,26 +126,16 @@ def crear_imagen_segmentada(markers, imagen_original):
         color = np.random.randint(0, 255, 3).tolist()
         imagen_coloreada[markers == nucleo_id] = color
 
-    # CONTORNOS: Dibujar bordes en rojo
-    imagen_contornos = (
-        cv2.cvtColor(imagen_original, cv2.COLOR_GRAY2BGR)
-        if len(imagen_original.shape) == 2
-        else imagen_original.copy()
-    )
-    contornos_mask = (markers == 0) | (markers == -1)
-    imagen_contornos[contornos_mask] = [0, 0, 255]
-
-    return imagen_coloreada, imagen_contornos
+    return imagen_coloreada
 
 
 def guardar_resultados(
     nombre_imagen,
     imagen_original,
     imagen_gris,
-    imagen_umbralizada,
-    imagen_morfologia,
+    imagen_otsu,
+    imagen_local,
     imagen_coloreada,
-    imagen_contornos,
     num_nucleos,
 ):
     base_name = os.path.splitext(nombre_imagen)[0]
@@ -132,10 +144,12 @@ def guardar_resultados(
 
     # GUARDAR: Imágenes individuales del pipeline
     cv2.imwrite(f"{carpeta_imagen}/1_BN.png", imagen_gris)
-    cv2.imwrite(f"{carpeta_imagen}/2_umbral.png", imagen_umbralizada)
-    cv2.imwrite(f"{carpeta_imagen}/3_morfologia.png", imagen_morfologia)
+    cv2.imwrite(f"{carpeta_imagen}/2_umbral_otsu.png", imagen_otsu)
+    
+    if imagen_local is not None:
+        cv2.imwrite(f"{carpeta_imagen}/3_umbral_local.png", imagen_local)
+    
     cv2.imwrite(f"{carpeta_imagen}/4_coloreada.png", imagen_coloreada)
-    cv2.imwrite(f"{carpeta_imagen}/5_contornos.png", imagen_contornos)
 
     # DIFERENCIAS: Comparar con ground truth
     ruta_gt = Path(GT_DIR) / nombre_imagen
@@ -169,16 +183,20 @@ def guardar_resultados(
 
     # COMPARATIVA: Grid 2x3 con todas las etapas
     img_gris_bgr = cv2.cvtColor(imagen_gris, cv2.COLOR_GRAY2BGR)
-    img_umbral_bgr = cv2.cvtColor(imagen_umbralizada, cv2.COLOR_GRAY2BGR)
-    img_morfologia_bgr = cv2.cvtColor(imagen_morfologia, cv2.COLOR_GRAY2BGR)
+    img_otsu_bgr = cv2.cvtColor(imagen_otsu, cv2.COLOR_GRAY2BGR)
+    
+    if imagen_local is not None:
+        img_local_bgr = cv2.cvtColor(imagen_local, cv2.COLOR_GRAY2BGR)
+    else:
+        img_local_bgr = np.zeros_like(img_otsu_bgr)
 
     h, w = imagen_original.shape[:2]
     scale = 0.4
     new_size = (int(w * scale), int(h * scale))
 
     img_gris_small = cv2.resize(img_gris_bgr, new_size)
-    img_umbral_small = cv2.resize(img_umbral_bgr, new_size)
-    img_morfologia_small = cv2.resize(img_morfologia_bgr, new_size)
+    img_otsu_small = cv2.resize(img_otsu_bgr, new_size)
+    img_local_small = cv2.resize(img_local_bgr, new_size)
     img_coloreada_small = cv2.resize(imagen_coloreada, new_size)
 
     if img_gt is not None:
@@ -191,7 +209,7 @@ def guardar_resultados(
     else:
         img_diff_small = np.zeros_like(img_coloreada_small)
 
-    fila1 = np.hstack([img_gris_small, img_umbral_small, img_morfologia_small])
+    fila1 = np.hstack([img_gris_small, img_otsu_small, img_local_small])
     fila2 = np.hstack([img_coloreada_small, img_gt_small, img_diff_small])
     comparativa = np.vstack([fila1, fila2])
 
@@ -201,11 +219,21 @@ def guardar_resultados(
 def procesar_imagen(ruta_imagen):
     nombre_imagen = os.path.basename(ruta_imagen)
 
-    # PIPELINE
+    # PIPELINE V1.2
     imagen_original, imagen_gris = cargar_imagen(ruta_imagen)
-    imagen_umbralizada = aplicar_umbralizacion(imagen_gris)
-    imagen_morfologia = aplicar_closing(imagen_umbralizada)
-    markers = aplicar_region_growing(imagen_morfologia)
+    imagen_combinada, imagen_otsu, imagen_local = aplicar_umbralizacion(imagen_gris)
+    
+    # V1.2: Morfología opcional (desactivada por defecto)
+    if USAR_MORFOLOGIA:
+        kernel = np.ones((3, 3), np.uint8)
+        imagen_para_watershed = cv2.morphologyEx(
+            imagen_combinada, cv2.MORPH_CLOSE, kernel, iterations=2
+        )
+    else:
+        imagen_para_watershed = imagen_combinada
+    
+    # V1.2: Watershed en vez de Region Growing
+    markers = aplicar_watershed(imagen_para_watershed)
 
     # Calcular núcleos
     ids_nucleos = np.unique(markers)
@@ -218,18 +246,15 @@ def procesar_imagen(ruta_imagen):
         areas.append(area)
 
     area_media = np.mean(areas) if areas else 0
-    imagen_coloreada, imagen_contornos = crear_imagen_segmentada(
-        markers, imagen_original
-    )
+    imagen_coloreada = crear_imagen_segmentada(markers, imagen_original)
 
     guardar_resultados(
         nombre_imagen,
         imagen_original,
         imagen_gris,
-        imagen_umbralizada,
-        imagen_morfologia,
+        imagen_otsu,
+        imagen_local,
         imagen_coloreada,
-        imagen_contornos,
         num_nucleos,
     )
 

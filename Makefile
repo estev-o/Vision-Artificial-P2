@@ -6,7 +6,7 @@ segmentar:
 	@.venv/bin/python segmentacion_nucleos.py
 
 evaluar:
-	@.venv/bin/python evaluar_segmentacion.py
+	@.venv/bin/python evaluar_pixel_a_pixel.py
 
 limpiar:
 	@rm -rf out
