@@ -322,9 +322,14 @@ Todos los parámetros son globales:
 - `6_diferencias.png`: Comparación (ROJO=FN, VERDE=TP, AZUL=FP)
 - `comparativa.png`: Grid 2×3 con todas las etapas
 
-## Resultados V1.2
+## Resultados V1.2 (Watershed Optimizado)
 
 **Dataset:** 30 imágenes H&E del dataset MoNuSeg
+
+### Cambios V1.2
+- Watershed con parámetros optimizados (umbral 0.3, dilatación 2)
+- Umbralización: Otsu OR Local (detecta si CUALQUIERA lo ve)
+- Sin morfología
 
 ### 1. Métricas de Segmentación (píxel a píxel)
 | Métrica | Valor | Interpretación |
@@ -334,12 +339,6 @@ Todos los parámetros son globales:
 | **Precision** | **67.76%** | Píxeles detectados correctos |
 | **Recall** | **81.56%** | Píxeles reales detectados |
 | **Accuracy** | **85.18%** | Píxeles correctos global |
-
-**Distribución F1:**
-- Excelente (≥90%): 0 imágenes
-- Bueno (70-90%): **18 imágenes** ✅
-- Regular (50-70%): **12 imágenes**
-- Malo (<50%): **0 imágenes** ✅
 
 ### 2. Métricas de Conteo (número de núcleos)
 | Métrica | Valor |
@@ -355,49 +354,135 @@ Todos los parámetros son globales:
 | **Área Media Pred** | **1421.44 px²** |
 | **Diferencia** | **957.97 px² (206.7%)** |
 
+**Distribución F1:**
+- Bueno (70-90%): 18 imágenes
+- Regular (50-70%): 12 imágenes
+- Malo (<50%): 0 imágenes
+
+---
+
+## Resultados V1.3 (Umbralización Secuencial)
+
+**Dataset:** 30 imágenes H&E del dataset MoNuSeg
+
+### Cambios V1.3
+**Problema detectado en V1.2:** El operador OR entre Otsu y Local sumaba el ruido de ambos métodos, generando:
+- Área 3x más grande que GT (1421 vs 463 px²)
+- Solo 47% de núcleos detectados (fusiones)
+- Precision baja (68%)
+
+**Solución implementada:** Umbralización SECUENCIAL
+```
+ANTES (V1.2): Otsu(imagen) OR Local(imagen) → suma todo el ruido
+AHORA (V1.3): Otsu(imagen) → Local(solo dentro de Otsu) → refinamiento conservador
+```
+
+**Estrategia:**
+1. Otsu detecta regiones de núcleos (primera pasada)
+2. Local refina SOLO dentro de las detecciones de Otsu
+3. Si AND es muy restrictivo (>40% pérdida), usar estrategia intermedia:
+   - Otsu como base + píxeles de Local cercanos a Otsu (dilatación 5x5)
+
+### 1. Métricas de Segmentación (píxel a píxel)
+| Métrica | Valor | Interpretación |
+|---------|-------|----------------|
+| **F1-Score** | **73.33%** | Balance precision-recall |
+| **IoU** | **58.55%** | Intersection over Union global |
+| **Precision** | **73.74%** | Píxeles detectados correctos |
+| **Recall** | **74.78%** | Píxeles reales detectados |
+| **Accuracy** | **86.60%** | Píxeles correctos global |
+
+### 2. Métricas de Conteo (número de núcleos)
+| Métrica | Valor |
+|---------|-------|
+| **Núcleos GT** | **723.8** (media) |
+| **Núcleos Pred** | **470.0** (media) |
+| **Precision Conteo** | **72.32%** |
+
+### 3. Métricas de Área (px²)
+| Métrica | Valor |
+|---------|-------|
+| **Área Media GT** | **463.47 px²** |
+| **Área Media Pred** | **614.04 px²** |
+| **Diferencia** | **150.56 px² (32.5%)** |
+
+**Distribución F1:**
+- Bueno (70-90%): **21 imágenes** ✅
+- Regular (50-70%): 8 imágenes
+- Malo (<50%): 1 imagen
+
 ### Mejores y peores casos
 
 **Mejor F1:**
-- TCGA-21-5784-01Z-00-DX1.png: F1 85.0% (GT:757 Pred:345)
+- TCGA-21-5784-01Z-00-DX1.png: F1 84.7% (GT:757 Pred:497)
 
 **Peor F1:**
-- TCGA-G9-6363-01Z-00-DX1.png: F1 53.2% (GT:354 Pred:283)
+- TCGA-G9-6363-01Z-00-DX1.png: F1 48.3% (GT:354 Pred:315)
 
-## Comparación V1.1 vs V1.2
+## Comparación de Versiones
 
-| Métrica | V1.1 (Region Growing) | V1.2 (Watershed Optimizado) | Cambio |
-|---------|----------------------|----------------------------|--------|
-| **F1-Score** | 65.87% | **72.89%** | **+7.02%** ✅ |
-| **IoU** | 50.40% | **57.99%** | **+7.59%** ✅ |
-| **Precision** | 54.91% | **67.76%** | **+12.85%** ✅ |
-| **Recall** | 86.73% | **81.56%** | -5.17% ⚠️ |
-| **Accuracy** | 77.76% | **85.18%** | **+7.42%** ✅ |
-| **Buenas (70-90%)** | 13 | **18** | **+5** ✅ |
-| **Malas (<50%)** | 4 | **0** | **-4** ✅ |
-| **Conteo** | 28.04% | **50.24%** | **+22.20%** ✅ |
+| Métrica | V1.1 (Region Growing) | V1.2 (Watershed + OR) | V1.3 (Watershed + Secuencial) | Mejor |
+|---------|----------------------|----------------------|-------------------------------|-------|
+| **F1-Score** | 65.87% | 72.89% | **73.33%** | V1.3 ✅ |
+| **IoU** | 50.40% | 57.99% | **58.55%** | V1.3 ✅ |
+| **Precision** | 54.91% | 67.76% | **73.74%** | V1.3 ✅ |
+| **Recall** | **86.73%** | 81.56% | 74.78% | V1.1 |
+| **Accuracy** | 77.76% | 85.18% | **86.60%** | V1.3 ✅ |
+| **Buenas (70-90%)** | 13 | 18 | **21** | V1.3 ✅ |
+| **Malas (<50%)** | 4 | 0 | 1 | V1.2 |
+| **Conteo Precision** | 28.04% | 50.24% | **72.32%** | V1.3 ✅ |
+| **Área Media** | - | 1421 px² | **614 px²** | V1.3 ✅ |
+| **Diferencia Área** | - | 206.7% | **32.5%** | V1.3 ✅ |
 
-## Análisis V1.2
+## Análisis V1.3 - Umbralización Secuencial
 
-### Balance óptimo: Precision y Recall
+### El problema del OR (V1.2)
 
-**Watershed optimizado supera a Region Growing:**
-- ✅ **F1 superior (73% vs 66%)**: Mejor rendimiento global en +7 puntos
-- ✅ **Mayor Precision (68% vs 55%)**: Menos falsos positivos, detecciones más confiables
-- ✅ **Recall alto (82% vs 87%)**: Solo 5 puntos menos pero mucho más preciso
-- ✅ **Mayor Accuracy (85% vs 78%)**: Mejor clasificación global de píxeles
-- ✅ **IoU superior (58% vs 50%)**: Mejor overlap con ground truth
-- ✅ **Más estable**: 0 imágenes malas vs 4 en V1.1, 18 buenas vs 13
-- ✅ **Mejor conteo (50% vs 28%)**: Menos fragmentación de núcleos
+En V1.2 usábamos: `imagen_final = Otsu(img) OR Local(img)`
 
-**Mejora dramática vs versión anterior de Watershed:**
-- Primera versión (umbral 0.5, dil 3): F1 61.61%, Recall 60.25%
-- **Versión optimizada (umbral 0.3, dil 2): F1 72.89%, Recall 81.56%**
-- Ganancia de +11 puntos F1 y +21 puntos Recall con la optimización
+**Problema:** El operador OR **suma el ruido de ambos métodos**
+- Otsu detecta núcleos + su ruido
+- Local detecta núcleos + su ruido  
+- OR combina todo → **ruido duplicado**
 
-**Por qué funciona la optimización:**
-1. **Umbral más bajo (0.3)**: Genera más semillas, captura núcleos débiles/pequeños
-2. **Menos dilatación (2)**: Región desconocida más amplia, Watershed decide mejor los bordes
-3. **Menos fragmentación**: Núcleos grandes mantienen una sola semilla
-4. **Mejor balance**: Captura más núcleos (recall) sin explotar falsos positivos (precision)
+**Consecuencias:**
+- Área 3x más grande (1421 vs 463 px²)
+- Núcleos fusionados (342 detectados vs 724 GT)
+- Precision limitada (68%)
 
-**Conclusión:** V1.2 con Watershed optimizado es ahora la **MEJOR versión** del sistema, superando tanto a Region Growing (V1.1) como a la versión inicial de Watershed. El ajuste de parámetros logró el balance óptimo entre precision y recall.
+### La solución secuencial (V1.3)
+
+**Nueva estrategia:** `Otsu(img) → Local(solo dentro de Otsu)`
+
+1. **Otsu detecta regiones candidatas** (primera pasada global)
+2. **Local refina SOLO dentro de esas regiones** (segunda pasada conservadora)
+3. **Estrategia adaptativa:**
+   - Si AND pierde >40% píxeles → usar estrategia intermedia
+   - Base: Otsu + píxeles de Local cercanos (dilatación 5x5)
+
+**Ventajas:**
+- ✅ Local solo trabaja donde Otsu ya detectó algo
+- ✅ Elimina ruido aislado de ambos métodos
+- ✅ Refinamiento conservador en vez de suma agresiva
+
+### Resultados V1.3
+
+**Mejoras sobre V1.2:**
+- **Precision +6 puntos** (68% → 74%): Menos falsos positivos
+- **Área -57%** (1421 → 614 px²): Mucho más realista
+- **Conteo +22 puntos** (50% → 72%): Menos fusiones
+- **+3 imágenes buenas** (18 → 21): Más consistente
+
+**Trade-off aceptable:**
+- **Recall -7 puntos** (82% → 75%): Precio de ser conservador
+- **Balance general mejoró**: F1 +0.44%, IoU +0.56%
+
+### Conclusión
+
+**V1.3 es la MEJOR versión:**
+1. ✅ **Mayor F1 y precisión**: Mejor balance global
+2. ✅ **Área realista**: 614 vs 463 px² (32% diferencia vs 206%)
+3. ✅ **Mejor conteo**: 72% precision vs 50%
+4. ✅ **Más consistente**: 70% imágenes en rango bueno
+
+**Clave del éxito:** La umbralización secuencial elimina el ruido del OR, siendo más inteligente al refinar solo dentro de detecciones válidas.

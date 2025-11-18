@@ -33,24 +33,46 @@ def cargar_imagen(ruta_imagen):
 
 def aplicar_umbralizacion(imagen_gris):
     """
-    Umbralización adaptativa por imagen (Otsu) y opcionalmente por regiones (adaptiveThreshold)
-    Devuelve: (imagen_final, imagen_otsu, imagen_local)
+    V1.3: Umbralización SECUENCIAL (más conservadora que OR)
+    
+    ANTES (V1.2): Otsu(img) OR Local(img) → suma ruido de ambos
+    AHORA (V1.3): Otsu(img) → Local(solo dentro de Otsu) → refinamiento conservador
+    
+    Ventaja: Local solo refina DENTRO de las regiones que Otsu ya detectó
+    Resultado: Menos ruido, más precision, mantiene recall
     """
     if UMBRAL_ADAPTATIVO:
-        # 1. Otsu global: encuentra el mejor umbral automáticamente para ESTA imagen
+        # 1. Otsu global: primera pasada, detecta regiones de núcleos
         _, imagen_otsu = cv2.threshold(
             imagen_gris, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
         )
         
-        # 2. Umbralización local: compensa variabilidad del fondo
+        # 2. Umbralización local: SOLO sobre resultado de Otsu (refinamiento)
         if UMBRAL_LOCAL:
-            # Combinar Otsu + adaptiveThreshold para mejores resultados
+            # Local sobre la imagen original
             imagen_local = cv2.adaptiveThreshold(
                 imagen_gris, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
                 cv2.THRESH_BINARY_INV, BLOCK_SIZE, C_CONSTANT
             )
-            # Combinar ambas: píxel es núcleo si CUALQUIERA lo detecta
-            imagen_combinada = cv2.bitwise_or(imagen_otsu, imagen_local)
+            
+            # ESTRATEGIA SECUENCIAL: Local AND Otsu (solo donde ambos coinciden)
+            # Esto es MÁS conservador que OR, elimina ruido
+            # Solo refinamos bordes DENTRO de las detecciones de Otsu
+            imagen_combinada = cv2.bitwise_and(imagen_otsu, imagen_local)
+            
+            # Si la intersección pierde demasiado, usar Otsu como base
+            # y agregar solo los píxeles de local que están CERCA de Otsu
+            pixeles_otsu = np.sum(imagen_otsu > 0)
+            pixeles_and = np.sum(imagen_combinada > 0)
+            
+            # Si AND elimina más del 40%, es demasiado conservador
+            if pixeles_and < 0.6 * pixeles_otsu:
+                # Estrategia intermedia: Otsu + bordes de local
+                kernel = np.ones((5, 5), np.uint8)
+                otsu_dilatado = cv2.dilate(imagen_otsu, kernel, iterations=1)
+                local_cercano = cv2.bitwise_and(imagen_local, otsu_dilatado)
+                imagen_combinada = cv2.bitwise_or(imagen_otsu, local_cercano)
+            
             return imagen_combinada, imagen_otsu, imagen_local
         else:
             return imagen_otsu, imagen_otsu, None
