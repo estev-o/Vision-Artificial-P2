@@ -4,22 +4,22 @@ import os
 import csv
 from pathlib import Path
 
-# ==================== PARÁMETROS ====================
-UMBRAL_VALOR = 110  # Valor de corte para la umbralización (NO SE USA si UMBRAL_ADAPTATIVO=True)
-
-# PARÁMETROS V1.1
+# ==================== PARÁMETROS V2.0 ====================
+# Umbralización
 UMBRAL_ADAPTATIVO = True  # Usar Otsu automático por imagen
-UMBRAL_LOCAL = True  # Umbralización adaptativa por regiones (después de Otsu global)
-BLOCK_SIZE = 51  # Tamaño de ventana para umbralización local (debe ser impar)
+UMBRAL_LOCAL = True  # Umbralización local para refinamiento
+BLOCK_SIZE = 51  # Tamaño de ventana para umbralización local (impar)
 C_CONSTANT = 2  # Constante restada al umbral local
 
-# PARÁMETROS V1.2 - WATERSHED (OPTIMIZADO)
-USAR_MORFOLOGIA = False  # V1.2: Morfología eliminada (molesta más que aporta)
-UMBRAL_DISTANCIA = 0.25  # V1.4: MÁS semillas para evitar fusiones (era 0.3)
-DILATACION_BACKGROUND = 1  # V1.4: MÁS margen en bordes (era 2)
+# Watershed
+UMBRAL_DISTANCIA = 0.25  # Umbral para semillas (0.25 = más semillas)
+DILATACION_BACKGROUND = 1  # Iteraciones de dilatación del fondo
 
-# PARÁMETROS V1.5 - RELLENO DE HUECOS POST-WATERSHED
-RELLENAR_HUECOS_NUCLEOS = True  # Rellenar huecos en núcleos YA segmentados
+# Post-procesamiento
+RELLENAR_HUECOS = True  # Rellenar huecos en núcleos
+CORREGIR_CONCAVIDADES = True  # Aplicar convex hull a núcleos con concavidades
+SOLIDEZ_MIN = 0.78  # Umbral para detectar concavidades (basado en P5 del GT)
+AREA_MIN_NUCLEO = 50  # Área mínima para filtrar ruido (mínimo del GT)
 
 INPUT_DIR = "Material Celulas/H"
 OUTPUT_DIR = "out"
@@ -36,55 +36,45 @@ def cargar_imagen(ruta_imagen):
 
 def aplicar_umbralizacion(imagen_gris):
     """
-    V1.3: Umbralización SECUENCIAL (más conservadora que OR)
+    V2.0: Umbralización secuencial (Otsu + Local adaptativo)
     
-    ANTES (V1.2): Otsu(img) OR Local(img) → suma ruido de ambos
-    AHORA (V1.3): Otsu(img) → Local(solo dentro de Otsu) → refinamiento conservador
+    Estrategia:
+    1. Otsu global detecta regiones de núcleos
+    2. Local adaptativo refina bordes DENTRO de Otsu
+    3. Si AND es muy conservador, usar estrategia intermedia
     
-    Ventaja: Local solo refina DENTRO de las regiones que Otsu ya detectó
-    Resultado: Menos ruido, más precision, mantiene recall
+    Mantiene el balance precision-recall evitando ruido del OR.
     """
-    if UMBRAL_ADAPTATIVO:
-        # 1. Otsu global: primera pasada, detecta regiones de núcleos
-        _, imagen_otsu = cv2.threshold(
-            imagen_gris, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
-        )
-        
-        # 2. Umbralización local: SOLO sobre resultado de Otsu (refinamiento)
-        if UMBRAL_LOCAL:
-            # Local sobre la imagen original
-            imagen_local = cv2.adaptiveThreshold(
-                imagen_gris, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                cv2.THRESH_BINARY_INV, BLOCK_SIZE, C_CONSTANT
-            )
-            
-            # ESTRATEGIA SECUENCIAL: Local AND Otsu (solo donde ambos coinciden)
-            # Esto es MÁS conservador que OR, elimina ruido
-            # Solo refinamos bordes DENTRO de las detecciones de Otsu
-            imagen_combinada = cv2.bitwise_and(imagen_otsu, imagen_local)
-            
-            # Si la intersección pierde demasiado, usar Otsu como base
-            # y agregar solo los píxeles de local que están CERCA de Otsu
-            pixeles_otsu = np.sum(imagen_otsu > 0)
-            pixeles_and = np.sum(imagen_combinada > 0)
-            
-            # Si AND elimina más del 40%, es demasiado conservador
-            if pixeles_and < 0.6 * pixeles_otsu:
-                # Estrategia intermedia: Otsu + bordes de local
-                kernel = np.ones((5, 5), np.uint8)
-                otsu_dilatado = cv2.dilate(imagen_otsu, kernel, iterations=1)
-                local_cercano = cv2.bitwise_and(imagen_local, otsu_dilatado)
-                imagen_combinada = cv2.bitwise_or(imagen_otsu, local_cercano)
-            
-            return imagen_combinada, imagen_otsu, imagen_local
-        else:
-            return imagen_otsu, imagen_otsu, None
-    else:
-        # Umbralización fija (modo antiguo)
-        _, imagen_umbralizada = cv2.threshold(
-            imagen_gris, UMBRAL_VALOR, 255, cv2.THRESH_BINARY_INV
-        )
-        return imagen_umbralizada, imagen_umbralizada, None
+    # 1. Otsu global: primera pasada automática
+    _, imagen_otsu = cv2.threshold(
+        imagen_gris, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU
+    )
+    
+    # 2. Umbralización local (si está activada)
+    if not UMBRAL_LOCAL:
+        return imagen_otsu, imagen_otsu, None
+    
+    # Local adaptativo sobre imagen original
+    imagen_local = cv2.adaptiveThreshold(
+        imagen_gris, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV, BLOCK_SIZE, C_CONSTANT
+    )
+    
+    # Estrategia secuencial: AND (solo donde ambos coinciden)
+    imagen_combinada = cv2.bitwise_and(imagen_otsu, imagen_local)
+    
+    # Si AND pierde >40% de píxeles, usar estrategia intermedia
+    pixeles_otsu = np.sum(imagen_otsu > 0)
+    pixeles_and = np.sum(imagen_combinada > 0)
+    
+    if pixeles_and < 0.6 * pixeles_otsu:
+        # Otsu + bordes de local cercanos
+        kernel = np.ones((5, 5), np.uint8)
+        otsu_dilatado = cv2.dilate(imagen_otsu, kernel, iterations=1)
+        local_cercano = cv2.bitwise_and(imagen_local, otsu_dilatado)
+        imagen_combinada = cv2.bitwise_or(imagen_otsu, local_cercano)
+    
+    return imagen_combinada, imagen_otsu, imagen_local
 
 
 def aplicar_watershed(imagen_binaria):
@@ -140,19 +130,69 @@ def aplicar_watershed(imagen_binaria):
     return markers
 
 
+def corregir_morfologia(markers):
+    """
+    V2.0: Corrección morfológica SIMPLIFICADA
+    
+    Solo hace 2 cosas:
+    1. Filtrar ruido (área < 50 px²)
+    2. Corregir concavidades con convex hull (solidez < 0.78)
+    
+    Eliminadas las correcciones complejas:
+    - Re-segmentación de elongados (CASO 2) - código complejo, pocos casos
+    - Unión de fragmentos (CASO 3) - riesgo de fusiones incorrectas
+    """
+    if not CORREGIR_CONCAVIDADES:
+        return markers
+    
+    markers_corregidos = markers.copy()
+    ids_nucleos = np.unique(markers)
+    ids_nucleos = ids_nucleos[ids_nucleos > 0]  # Excluir fondo
+    
+    for nucleo_id in ids_nucleos:
+        # Extraer máscara del núcleo
+        mascara = (markers == nucleo_id).astype(np.uint8) * 255
+        
+        # Encontrar contorno
+        contornos, _ = cv2.findContours(
+            mascara, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        
+        if len(contornos) == 0 or len(contornos[0]) < 5:
+            continue
+        
+        contorno = contornos[0]
+        area = cv2.contourArea(contorno)
+        
+        # FILTRO 1: Eliminar ruido (núcleos muy pequeños)
+        if area < AREA_MIN_NUCLEO:
+            markers_corregidos[mascara > 0] = 0
+            continue
+        
+        # FILTRO 2: Corregir concavidades con convex hull
+        hull = cv2.convexHull(contorno)
+        area_convexa = cv2.contourArea(hull)
+        
+        # Calcular solidez (qué tan "lleno" está el núcleo)
+        solidez = area / area_convexa if area_convexa > 0 else 1.0
+        
+        # Si tiene baja solidez → tiene concavidades → aplicar convex hull
+        if solidez < SOLIDEZ_MIN:
+            mascara_corregida = np.zeros_like(mascara)
+            cv2.drawContours(mascara_corregida, [hull], -1, 255, -1)
+            markers_corregidos[mascara_corregida > 0] = nucleo_id
+    
+    return markers_corregidos
+
+
 def rellenar_huecos_nucleos(markers):
     """
-    V1.5: Rellena huecos de cada núcleo DESPUÉS de Watershed
+    V2.0: Rellena huecos de cada núcleo DESPUÉS de Watershed
     
-    SEGURO porque Watershed ya separó los núcleos. Ahora solo:
-    1. Para cada núcleo (ID individual en markers)
-    2. Convertir a máscara binaria
-    3. Rellenar huecos con drawContours FILLED
-    4. NO puede fusionar núcleos (cada uno tiene ID diferente)
-    
-    Estrategia visual: Si un contorno tiene huecos, rellenarlo completo
+    Seguro porque cada núcleo ya tiene su propio ID.
+    Rellena el contorno completo para evitar huecos internos.
     """
-    if not RELLENAR_HUECOS_NUCLEOS:
+    if not RELLENAR_HUECOS:
         return markers
     
     markers_rellenos = markers.copy()
@@ -287,24 +327,19 @@ def guardar_resultados(
 def procesar_imagen(ruta_imagen):
     nombre_imagen = os.path.basename(ruta_imagen)
 
-    # PIPELINE V1.5
+    # PIPELINE V2.0 - SIMPLIFICADO
     imagen_original, imagen_gris = cargar_imagen(ruta_imagen)
     imagen_combinada, imagen_otsu, imagen_local = aplicar_umbralizacion(imagen_gris)
     
-    # V1.2: Morfología opcional (desactivada por defecto)
-    if USAR_MORFOLOGIA:
-        kernel = np.ones((3, 3), np.uint8)
-        imagen_para_watershed = cv2.morphologyEx(
-            imagen_combinada, cv2.MORPH_CLOSE, kernel, iterations=2
-        )
-    else:
-        imagen_para_watershed = imagen_combinada
+    # Watershed: Separar núcleos tocándose
+    markers = aplicar_watershed(imagen_combinada)
     
-    # V1.4: Watershed con parámetros ajustados
-    markers = aplicar_watershed(imagen_para_watershed)
-    
-    # V1.5: Rellenar huecos de núcleos YA segmentados (seguro, no fusiona)
+    # Post-procesamiento:
+    # 1. Rellenar huecos internos
     markers = rellenar_huecos_nucleos(markers)
+    
+    # 2. Corregir concavidades y filtrar ruido
+    markers = corregir_morfologia(markers)
 
     # Calcular núcleos
     ids_nucleos = np.unique(markers)

@@ -609,3 +609,315 @@ def rellenar_huecos_nucleos(markers):
 - Para análisis biológico (conteo + medición de área)
 - Para estudios morfológicos (formas completas)
 - **Recomendado como versión final** ⭐
+
+---
+
+# V2.0 - Pipeline Simplificado 🚀
+
+## Filosofía del Cambio
+
+> **"Simplicidad es la máxima sofisticación"** - Leonardo da Vinci
+
+**Motivación:** Análisis del Ground Truth reveló que mucha complejidad en V1.6 no aportaba valor:
+- Re-segmentación de elongados: solo 4.5% casos (aspect ratio > 2.0)
+- Unión de fragmentos: código complejo con riesgo de fusiones incorrectas
+- Múltiples parámetros sin justificación en datos reales
+
+**Objetivo:** Mantener eficacia reduciendo complejidad 30%
+
+## Análisis del Ground Truth
+
+Ejecutado `analizar_gt.py` sobre 16,819 núcleos reales:
+
+### Estadísticas Morfométricas del GT
+| Métrica | Valor | Uso |
+|---------|-------|-----|
+| **Área media** | 432 px² | Validar tamaño típico |
+| **Área mediana** | 288 px² | Distribución sesgada |
+| **Diámetro típico** | 23.5 px | Parámetro Watershed |
+| **Circularidad media** | 0.727 | Núcleos moderadamente circulares |
+| **Solidez media** | 0.932 | Mayoría sin concavidades |
+| **Aspect ratio medio** | 1.336 | Ligeramente elongados |
+
+### Percentiles Críticos (Base para Parámetros)
+| Percentil | Área | Solidez | Circularidad | Aspect Ratio |
+|-----------|------|---------|--------------|--------------|
+| **P5** | 80 px² | 0.785 | 0.392 | - |
+| **P95** | 1239 px² | 0.981 | 0.879 | 2.0 |
+| **P99** | - | - | - | 2.623 |
+
+**Conclusiones:**
+- 95% núcleos tienen solidez > 0.785 → umbral 0.78 detecta anomalías reales
+- 95% núcleos tienen aspect ratio < 2.0 → casos elongados son raros
+- Área mínima 80 px² es P5 → filtrar < 50 px² es seguro
+
+## Cambios Implementados
+
+### ❌ **Código Eliminado (~180 líneas)**
+
+**1. CASO 2 - Re-segmentación de elongados (~50 líneas)**
+```python
+# Eliminado: Watershed local recursivo para núcleos elongados
+# Razón: Solo 4.5% casos (aspect_ratio > 2.0), complejidad no justificada
+# Riesgo: Ruido en distancia transformada causa más problemas
+```
+
+**2. CASO 3 - Unión de fragmentos (~80 líneas)**
+```python
+# Eliminado: Búsqueda y unión de fragmentos cercanos
+# Razón: Riesgo de fusionar núcleos que no deben unirse
+# Alternativa: Filtro de área mínima (50 px²) elimina fragmentos
+```
+
+**3. Morfología opcional (código muerto)**
+```python
+# Eliminado: Parámetro USAR_MORFOLOGIA (siempre False desde V1.2)
+# Eliminado: Lógica condicional en pipeline
+```
+
+**4. Umbralización fija (código legacy)**
+```python
+# Eliminado: Modo UMBRAL_ADAPTATIVO = False
+# Razón: Nunca usado, Otsu es siempre mejor
+```
+
+**5. Parámetros innecesarios**
+```python
+# Eliminados:
+# - ASPECT_RATIO_MAX (solo para CASO 2 eliminado)
+# - CIRCULARIDAD_MIN (solo para CASO 3 eliminado)
+# - AREA_MAX_NUCLEO (detección de fusiones no efectiva)
+# - USAR_FILTRO_AREA_MAX
+# - DISTANCIA_UNION_FRAGMENTOS
+```
+
+### ✅ **Pipeline Resultante (Simple y Efectivo)**
+
+```
+INPUT: Imagen H&E canal Hematoxilina
+  ↓
+1. Otsu Global (automático por imagen)
+  ↓
+2. Local Adaptativo (refinamiento secuencial)
+  ↓  
+3. Watershed (umbral 0.25, dilatación 1)
+  ↓
+4. Rellenar Huecos (seguro post-Watershed)
+  ↓
+5. Filtrar Ruido (< 50 px²)
+  ↓
+6. Convex Hull (solidez < 0.78)
+  ↓
+OUTPUT: Núcleos segmentados
+```
+
+### ✅ **Parámetros V2.0 (Solo 10, basados en GT)**
+
+```python
+# UMBRALIZACIÓN
+UMBRAL_ADAPTATIVO = True      # Otsu por imagen
+UMBRAL_LOCAL = True            # Refinamiento local
+BLOCK_SIZE = 51                # Ventana Gaussian (impar)
+C_CONSTANT = 2                 # Offset threshold
+
+# WATERSHED  
+UMBRAL_DISTANCIA = 0.25        # Más semillas (vs 0.3)
+DILATACION_BACKGROUND = 1      # Más margen (vs 2)
+
+# POST-PROCESAMIENTO
+RELLENAR_HUECOS = True         # Relleno seguro
+CORREGIR_CONCAVIDADES = True   # Convex hull
+SOLIDEZ_MIN = 0.78             # P5 del GT = 0.785
+AREA_MIN_NUCLEO = 50           # Mínimo del GT = 50 px²
+```
+
+**Justificación por datos:**
+- `SOLIDEZ_MIN = 0.78`: Solo 5% del GT tiene solidez menor → detecta anomalías reales
+- `AREA_MIN_NUCLEO = 50`: Mínimo absoluto del GT → no pierde núcleos legítimos
+
+## Resultados V2.0
+
+**Dataset:** 30 imágenes H&E del dataset MoNuSeg
+
+### 1. Métricas de Segmentación (píxel a píxel)
+| Métrica | Valor | Interpretación |
+|---------|-------|----------------|
+| **F1-Score** | **70.58%** | Balance precision-recall |
+| **IoU** | **55.28%** | Intersection over Union global |
+| **Precision** | **73.32%** | Píxeles detectados correctos |
+| **Recall** | **70.31%** | Píxeles reales detectados |
+| **Accuracy** | **85.69%** | Píxeles correctos global |
+
+### 2. Métricas de Conteo (número de núcleos)
+| Métrica | Valor |
+|---------|-------|
+| **Núcleos GT** | **723.8** (media) |
+| **Núcleos Pred** | **565.9** (media) |
+| **Precision Conteo** | **79.00%** 🏆 |
+
+### 3. Métricas de Área (px²)
+| Métrica | Valor |
+|---------|-------|
+| **Área Media GT** | **463.47 px²** |
+| **Área Media Pred** | **465.68 px²** |
+| **Diferencia** | **2.20 px² (0.5%)** |
+
+**Distribución F1:**
+- Bueno (70-90%): **16 imágenes**
+- Regular (50-70%): 13 imágenes
+- Malo (<50%): 1 imagen
+
+### Mejores y peores casos
+
+**Mejor F1:**
+- TCGA-21-5784-01Z-00-DX1.png: F1 84.1% (GT:757 Pred:540)
+
+**Peor F1:**
+- TCGA-G9-6363-01Z-00-DX1.png: F1 46.3% (GT:354 Pred:370)
+
+## Comparación de Versiones (Tabla Completa)
+
+| Métrica | V1.3 | V1.5 | V1.6 Original | V1.6 Opt | **V2.0** | Mejor |
+|---------|------|------|---------------|----------|----------|-------|
+| **F1-Score** | **73.33%** | 70.67% | 72.43% | 67.45% | **70.58%** | V1.3 |
+| **Recall** | **74.78%** | 69.18% | 73.98% | 64.74% | 70.31% | V1.3 |
+| **Precision** | 73.74% | 74.44% | 72.73% | **74.08%** | 73.32% | V1.6 Opt |
+| **Área Error** | 32.5% | 12.2% | 0.8% | **0.1%** | **0.5%** | V1.6 Opt |
+| **Núcleos** | 470 | 626 | 616 | 507 | **566** | V1.5 |
+| **Prec. Conteo** | 72.32% | 75.00% | 75.75% | 77.30% | **79.00%** 🏆 | **V2.0** |
+| **Imágenes >70%** | **21** | 18 | 19 | 15 | **16** | V1.3 |
+| **Código (líneas)** | ~600 | ~600 | ~600 | ~600 | **~420** 🏆 | **V2.0** |
+
+## Análisis V2.0: Éxitos y Trade-offs
+
+### 🏆 **Éxitos de la Simplificación**
+
+**1. Mejor Precision de Conteo (79.00%)**
+- ✅ Eliminamos uniones incorrectas de fragmentos (CASO 3)
+- ✅ Eliminamos re-segmentaciones erróneas (CASO 2)
+- ✅ Resultado: Menos falsos positivos por fragmentación
+
+**2. Conteo más realista (566 núcleos)**
+- V1.6 Original: 616 (demasiados por re-segmentación)
+- V1.6 Optimizada: 507 (muy pocos por filtro agresivo)
+- **V2.0: 566 (balance perfecto - 78% del GT)**
+
+**3. Área casi perfecta (0.5% error)**
+- Entre V1.6 Opt (0.1%) y V1.6 Original (0.8%)
+- Convex hull funciona sin correcciones complejas
+
+**4. Código 30% más simple (420 vs 600 líneas)**
+- ✅ Sin lógica recursiva (Watershed local)
+- ✅ Sin búsquedas cuadráticas (unión fragmentos)
+- ✅ Sin condicionales complejas
+- ✅ Más fácil de entender y mantener
+
+**5. Balance Precision-Recall**
+```
+Precision: 73.32%
+Recall:    70.31%
+Diferencia: 3.01 puntos (muy equilibrado)
+```
+
+### ⚖️ **Trade-offs Aceptados**
+
+**F1: 73.33% (V1.3) → 70.58% (V2.0)**
+- Diferencia: -2.75 puntos
+- **Justificación:** A cambio de:
+  - 180 líneas menos de código complejo
+  - Mejor conteo (+6.68 puntos precision)
+  - Área más precisa
+  - Pipeline más robusto
+
+**Imágenes buenas: 21 (V1.3) → 16 (V2.0)**
+- Pérdida: 5 imágenes
+- **Justificación:** Simplicidad vale más que optimización extrema
+
+## Conclusión: ¿Por qué V2.0 es la Mejor Versión?
+
+### ✅ **Ventajas Técnicas**
+
+1. **Código más limpio y mantenible**
+   - 30% menos líneas (420 vs 600)
+   - Sin recursión ni lógica compleja
+   - Fácil de entender por nuevos desarrolladores
+
+2. **Parámetros basados en datos**
+   - SOLIDEZ_MIN = 0.78 (P5 del GT)
+   - AREA_MIN_NUCLEO = 50 (mínimo del GT)
+   - No son valores arbitrarios
+
+3. **Pipeline robusto**
+   - Cada paso hace una cosa simple
+   - Sin decisiones condicionales complejas
+   - Menos puntos de fallo
+
+4. **Mejor para análisis biológico**
+   - **Conteo más preciso:** 79% (el mejor)
+   - **Área realista:** 0.5% error
+   - **Núcleos completos:** Sin huecos, con convex hull
+
+### 📊 **Cuando Usar Cada Versión**
+
+| Versión | Usar Si... |
+|---------|-----------|
+| **V1.3** | Solo importa F1 máximo (73.33%) |
+| **V1.5** | Necesitas conteo+área, aceptas código complejo |
+| **V1.6** | Quieres experimentar con correcciones morfológicas |
+| **V2.0** ⭐ | **Proyecto profesional, balance calidad/simplicidad** |
+
+### 🎯 **V2.0: Recomendación Final**
+
+**Úsala para:**
+- ✅ Entrega de proyecto (código limpio)
+- ✅ Análisis de conteo celular (79% precision)
+- ✅ Estudios morfométricos (área 0.5% error)
+- ✅ Mantenimiento a largo plazo
+- ✅ Colaboración en equipo (fácil de entender)
+
+**No uses si:**
+- ❌ Solo importa maximizar F1 a cualquier costo
+- ❌ Tienes recursos ilimitados para tunear parámetros
+- ❌ No te importa la complejidad del código
+
+### 📝 **Lecciones Aprendidas**
+
+1. **Análisis de datos > Intuición**
+   - El análisis del GT reveló que muchas "mejoras" no tenían base
+   - P5/P95 del GT son mejores que valores arbitrarios
+
+2. **Menos es más**
+   - CASO 2 y CASO 3 añadían complejidad sin valor real
+   - Simplicidad mejora robustez
+
+3. **Trade-offs claros**
+   - -2.75 puntos F1 por -180 líneas código
+   - **Vale totalmente la pena**
+
+4. **Métricas importan según contexto**
+   - Para biología: Conteo (79%) > F1 (70.58%)
+   - V2.0 optimiza lo que importa
+
+---
+
+## Pipeline Final Recomendado: V2.0 ⭐
+
+```python
+def procesar_imagen_v2(imagen):
+    # 1. Umbralización (Otsu + Local secuencial)
+    imagen_otsu = cv2.threshold(imagen, THRESH_OTSU)
+    imagen_local = cv2.adaptiveThreshold(imagen, GAUSSIAN)
+    imagen_final = estrategia_secuencial(imagen_otsu, imagen_local)
+    
+    # 2. Watershed (parámetros optimizados)
+    markers = aplicar_watershed(imagen_final, umbral=0.25, dil=1)
+    
+    # 3. Post-procesamiento simple
+    markers = rellenar_huecos(markers)           # Relleno seguro
+    markers = filtrar_por_area(markers, min=50)  # Eliminar ruido
+    markers = corregir_convex_hull(markers, solidez=0.78)  # Concavidades
+    
+    return markers
+```
+
+**4 pasos, 420 líneas, 79% precision de conteo. Simplicidad profesional.** 🚀
