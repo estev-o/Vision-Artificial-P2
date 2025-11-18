@@ -411,78 +411,201 @@ AHORA (V1.3): Otsu(imagen) → Local(solo dentro de Otsu) → refinamiento conse
 - Regular (50-70%): 8 imágenes
 - Malo (<50%): 1 imagen
 
+---
+
+## Resultados V1.4 (Watershed Agresivo)
+
+**Dataset:** 30 imágenes H&E del dataset MoNuSeg
+
+### Cambios V1.4
+**Problema detectado en V1.3:** Aunque F1 era alto (73.33%), tenía problemas de conteo y área:
+- Área 33% más grande que GT (614 vs 463 px²)
+- Solo 65% de núcleos detectados (470 vs 724)
+- Watershed fusionaba núcleos cercanos
+
+**Solución implementada:** Parámetros más agresivos en Watershed
+```python
+UMBRAL_DISTANCIA = 0.25  # Antes 0.3 → MÁS semillas (más núcleos individuales)
+DILATACION_BACKGROUND = 1  # Antes 2 → MÁS margen para bordes precisos
+```
+
+**Estrategia:**
+- Umbral más bajo → detecta más picos en transformada de distancia
+- Menos dilatación → región desconocida más grande → Watershed decide mejor
+- Resultado: más núcleos individuales, menos fusiones
+
+### 1. Métricas de Segmentación (píxel a píxel)
+| Métrica | Valor | Interpretación |
+|---------|-------|----------------|
+| **F1-Score** | **70.32%** | Balance precision-recall |
+| **IoU** | **55.05%** | Intersection over Union global |
+| **Precision** | **74.30%** | Píxeles detectados correctos |
+| **Recall** | **68.63%** | Píxeles reales detectados |
+| **Accuracy** | **85.77%** | Píxeles correctos global |
+
+### 2. Métricas de Conteo (número de núcleos)
+| Métrica | Valor |
+|---------|-------|
+| **Núcleos GT** | **723.8** (media) |
+| **Núcleos Pred** | **625.9** (media) |
+| **Precision Conteo** | **74.98%** |
+
+### 3. Métricas de Área (px²)
+| Métrica | Valor |
+|---------|-------|
+| **Área Media GT** | **463.47 px²** |
+| **Área Media Pred** | **403.88 px²** |
+| **Diferencia** | **59.59 px² (12.9%)** |
+
+**Distribución F1:**
+- Bueno (70-90%): 18 imágenes
+- Regular (50-70%): 11 imágenes
+- Malo (<50%): 1 imagen
+
+**Trade-off V1.3 → V1.4:**
+- ❌ F1 bajó 3 puntos (73.33% → 70.32%)
+- ✅ Área mejoró dramáticamente (33% → 13% diferencia)
+- ✅ Conteo mejoró +33% (470 → 626 núcleos)
+
+---
+
+## Resultados V1.5 (Relleno de Huecos Post-Watershed) ⭐
+
+**Dataset:** 30 imágenes H&E del dataset MoNuSeg
+
+### Cambios V1.5
+**Mejora sobre V1.4:** Rellenar huecos internos de núcleos DESPUÉS de Watershed
+
+**Solución implementada:** Relleno seguro por núcleo individual
+```python
+def rellenar_huecos_nucleos(markers):
+    # Para cada núcleo YA segmentado (ID único)
+    for nucleo_id in ids_nucleos:
+        mascara_nucleo = (markers == nucleo_id)
+        contornos = findContours(mascara_nucleo)
+        drawContours(contornos, FILLED)  # Rellena huecos
+```
+
+**Por qué es seguro:**
+- Watershed ya separó núcleos con IDs únicos
+- Cada núcleo se procesa independientemente
+- **Imposible fusionar** núcleos (tienen IDs diferentes)
+- Solo rellena huecos INTERNOS de cada núcleo
+
+### 1. Métricas de Segmentación (píxel a píxel)
+| Métrica | Valor | Interpretación |
+|---------|-------|----------------|
+| **F1-Score** | **70.67%** | Balance precision-recall |
+| **IoU** | **55.47%** | Intersection over Union global |
+| **Precision** | **74.44%** | Píxeles detectados correctos |
+| **Recall** | **69.18%** | Píxeles reales detectados |
+| **Accuracy** | **85.90%** | Píxeles correctos global |
+
+### 2. Métricas de Conteo (número de núcleos)
+| Métrica | Valor |
+|---------|-------|
+| **Núcleos GT** | **723.8** (media) |
+| **Núcleos Pred** | **625.9** (media) |
+| **Precision Conteo** | **75.00%** |
+
+### 3. Métricas de Área (px²)
+| Métrica | Valor |
+|---------|-------|
+| **Área Media GT** | **463.47 px²** |
+| **Área Media Pred** | **406.70 px²** |
+| **Diferencia** | **56.77 px² (12.2%)** |
+
+**Distribución F1:**
+- Bueno (70-90%): 18 imágenes
+- Regular (50-70%): 11 imágenes
+- Malo (<50%): 1 imagen
+
 ### Mejores y peores casos
 
 **Mejor F1:**
-- TCGA-21-5784-01Z-00-DX1.png: F1 84.7% (GT:757 Pred:497)
+- TCGA-21-5784-01Z-00-DX1.png: F1 83.7% (GT:757 Pred:529)
 
 **Peor F1:**
-- TCGA-G9-6363-01Z-00-DX1.png: F1 48.3% (GT:354 Pred:315)
+- TCGA-G9-6363-01Z-00-DX1.png: F1 45.0% (GT:354 Pred:495)
 
 ## Comparación de Versiones
 
-| Métrica | V1.1 (Region Growing) | V1.2 (Watershed + OR) | V1.3 (Watershed + Secuencial) | Mejor |
-|---------|----------------------|----------------------|-------------------------------|-------|
-| **F1-Score** | 65.87% | 72.89% | **73.33%** | V1.3 ✅ |
-| **IoU** | 50.40% | 57.99% | **58.55%** | V1.3 ✅ |
-| **Precision** | 54.91% | 67.76% | **73.74%** | V1.3 ✅ |
-| **Recall** | **86.73%** | 81.56% | 74.78% | V1.1 |
-| **Accuracy** | 77.76% | 85.18% | **86.60%** | V1.3 ✅ |
-| **Buenas (70-90%)** | 13 | 18 | **21** | V1.3 ✅ |
-| **Malas (<50%)** | 4 | 0 | 1 | V1.2 |
-| **Conteo Precision** | 28.04% | 50.24% | **72.32%** | V1.3 ✅ |
-| **Área Media** | - | 1421 px² | **614 px²** | V1.3 ✅ |
-| **Diferencia Área** | - | 206.7% | **32.5%** | V1.3 ✅ |
+| Métrica | V1.1 | V1.2 | V1.3 | V1.4 | V1.5 | Mejor |
+|---------|------|------|------|------|------|-------|
+| **F1-Score** | 65.87% | 72.89% | **73.33%** | 70.32% | 70.67% | V1.3 |
+| **IoU** | 50.40% | 57.99% | **58.55%** | 55.05% | 55.47% | V1.3 |
+| **Precision** | 54.91% | 67.76% | 73.74% | **74.30%** | **74.44%** | V1.5 ✅ |
+| **Recall** | **86.73%** | 81.56% | 74.78% | 68.63% | 69.18% | V1.1 |
+| **Accuracy** | 77.76% | 85.18% | **86.60%** | 85.77% | 85.90% | V1.3 |
+| **Núcleos Pred** | - | 342 | 470 | **626** | **626** | V1.4/5 ✅ |
+| **Conteo Precision** | 28.04% | 50.24% | 72.32% | 74.98% | **75.00%** | V1.5 ✅ |
+| **Área Media** | - | 1421 px² | 614 px² | 404 px² | **407 px²** | V1.5 ✅ |
+| **Diferencia Área** | - | 206.7% | 32.5% | 12.9% | **12.2%** | V1.5 ✅ |
+| **Buenas (70-90%)** | 13 | 18 | **21** | 18 | 18 | V1.3 |
 
-## Análisis V1.3 - Umbralización Secuencial
+## Análisis Final - Evolución del Sistema
 
-### El problema del OR (V1.2)
+### Progresión de Mejoras
 
-En V1.2 usábamos: `imagen_final = Otsu(img) OR Local(img)`
+**V1.1 → V1.2: Watershed básico**
+- Cambio: Region Growing → Watershed con OR
+- F1: 65.87% → 72.89% (+7 puntos)
+- Problema: Área 3x más grande
 
-**Problema:** El operador OR **suma el ruido de ambos métodos**
-- Otsu detecta núcleos + su ruido
-- Local detecta núcleos + su ruido  
-- OR combina todo → **ruido duplicado**
+**V1.2 → V1.3: Umbralización secuencial** 
+- Cambio: OR → AND/estrategia secuencial
+- F1: 72.89% → 73.33% (+0.44 puntos) 
+- Área: 1421 → 614 px² (-57%)
+- Mejor F1 global pero área aún 33% grande
 
-**Consecuencias:**
-- Área 3x más grande (1421 vs 463 px²)
-- Núcleos fusionados (342 detectados vs 724 GT)
-- Precision limitada (68%)
+**V1.3 → V1.4: Watershed agresivo**
+- Cambio: Parámetros 0.3/2 → 0.25/1
+- F1: 73.33% → 70.32% (-3 puntos)
+- Área: 614 → 404 px² (-34%, casi perfecta!)
+- Núcleos: 470 → 626 (+33%)
+- Trade-off: sacrifica F1 por conteo/área realista
 
-### La solución secuencial (V1.3)
+**V1.4 → V1.5: Relleno post-Watershed**
+- Cambio: Rellenar huecos después de segmentar
+- F1: 70.32% → 70.67% (+0.35 puntos)
+- Área: 404 → 407 px² (estable)
+- Mejora TODAS las métricas sin efectos secundarios
 
-**Nueva estrategia:** `Otsu(img) → Local(solo dentro de Otsu)`
+### Comparación V1.3 vs V1.5
 
-1. **Otsu detecta regiones candidatas** (primera pasada global)
-2. **Local refina SOLO dentro de esas regiones** (segunda pasada conservadora)
-3. **Estrategia adaptativa:**
-   - Si AND pierde >40% píxeles → usar estrategia intermedia
-   - Base: Otsu + píxeles de Local cercanos (dilatación 5x5)
+**V1.3 (Mejor F1):**
+- ✅ F1 más alto: 73.33%
+- ✅ Más imágenes buenas: 21
+- ❌ Área 33% más grande (614 vs 463 px²)
+- ❌ Solo 65% núcleos detectados (470 vs 724)
 
-**Ventajas:**
-- ✅ Local solo trabaja donde Otsu ya detectó algo
-- ✅ Elimina ruido aislado de ambos métodos
-- ✅ Refinamiento conservador en vez de suma agresiva
+**V1.5 (Mejor para análisis biológico):**
+- ✅ Área casi perfecta: 12.2% diferencia
+- ✅ 86% núcleos detectados (626 vs 724)
+- ✅ Mejor conteo: 75% precision
+- ✅ Núcleos con formas completas (sin huecos)
+- ⚠️ F1 2.66 puntos menor (70.67% vs 73.33%)
 
-### Resultados V1.3
+### Conclusión Final
 
-**Mejoras sobre V1.2:**
-- **Precision +6 puntos** (68% → 74%): Menos falsos positivos
-- **Área -57%** (1421 → 614 px²): Mucho más realista
-- **Conteo +22 puntos** (50% → 72%): Menos fusiones
-- **+3 imágenes buenas** (18 → 21): Más consistente
+**V1.5 es la mejor versión para análisis celular:**
 
-**Trade-off aceptable:**
-- **Recall -7 puntos** (82% → 75%): Precio de ser conservador
-- **Balance general mejoró**: F1 +0.44%, IoU +0.56%
+1. ✅ **Área realista** (407 vs 463 px²): Solo 12% diferencia
+2. ✅ **Excelente conteo** (626 vs 724): 86% detectados, 75% precision
+3. ✅ **Núcleos completos**: Sin huecos internos
+4. ✅ **Proceso seguro**: Relleno post-segmentación, imposible fusionar
 
-### Conclusión
+**Trade-off justificado:**
+- El F1 3 puntos menor es aceptable considerando:
+  - Área 20 puntos porcentuales más precisa (33% → 12%)
+  - 156 núcleos más detectados (+33%)
+  - Formas más realistas para análisis morfológico
 
-**V1.3 es la MEJOR versión:**
-1. ✅ **Mayor F1 y precisión**: Mejor balance global
-2. ✅ **Área realista**: 614 vs 463 px² (32% diferencia vs 206%)
-3. ✅ **Mejor conteo**: 72% precision vs 50%
-4. ✅ **Más consistente**: 70% imágenes en rango bueno
+**Cuándo usar V1.3:**
+- Si solo importa la segmentación píxel-a-píxel (F1 máximo)
+- Si no se requiere conteo preciso
 
-**Clave del éxito:** La umbralización secuencial elimina el ruido del OR, siendo más inteligente al refinar solo dentro de detecciones válidas.
+**Cuándo usar V1.5:**
+- Para análisis biológico (conteo + medición de área)
+- Para estudios morfológicos (formas completas)
+- **Recomendado como versión final** ⭐

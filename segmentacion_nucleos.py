@@ -15,8 +15,11 @@ C_CONSTANT = 2  # Constante restada al umbral local
 
 # PARÁMETROS V1.2 - WATERSHED (OPTIMIZADO)
 USAR_MORFOLOGIA = False  # V1.2: Morfología eliminada (molesta más que aporta)
-UMBRAL_DISTANCIA = 0.3  # Umbral para sure foreground - MÁS AGRESIVO (era 0.5)
-DILATACION_BACKGROUND = 2  # Iteraciones de dilatación para sure background - MENOS CONSERVADOR (era 3)
+UMBRAL_DISTANCIA = 0.25  # V1.4: MÁS semillas para evitar fusiones (era 0.3)
+DILATACION_BACKGROUND = 1  # V1.4: MÁS margen en bordes (era 2)
+
+# PARÁMETROS V1.5 - RELLENO DE HUECOS POST-WATERSHED
+RELLENAR_HUECOS_NUCLEOS = True  # Rellenar huecos en núcleos YA segmentados
 
 INPUT_DIR = "Material Celulas/H"
 OUTPUT_DIR = "out"
@@ -137,6 +140,49 @@ def aplicar_watershed(imagen_binaria):
     return markers
 
 
+def rellenar_huecos_nucleos(markers):
+    """
+    V1.5: Rellena huecos de cada núcleo DESPUÉS de Watershed
+    
+    SEGURO porque Watershed ya separó los núcleos. Ahora solo:
+    1. Para cada núcleo (ID individual en markers)
+    2. Convertir a máscara binaria
+    3. Rellenar huecos con drawContours FILLED
+    4. NO puede fusionar núcleos (cada uno tiene ID diferente)
+    
+    Estrategia visual: Si un contorno tiene huecos, rellenarlo completo
+    """
+    if not RELLENAR_HUECOS_NUCLEOS:
+        return markers
+    
+    markers_rellenos = markers.copy()
+    
+    # Obtener IDs únicos de núcleos
+    ids_nucleos = np.unique(markers)
+    ids_nucleos = ids_nucleos[ids_nucleos > 0]  # Excluir fondo (0)
+    
+    for nucleo_id in ids_nucleos:
+        # Extraer máscara del núcleo individual
+        mascara_nucleo = (markers == nucleo_id).astype(np.uint8) * 255
+        
+        # Encontrar contornos del núcleo
+        contornos, _ = cv2.findContours(
+            mascara_nucleo, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+        
+        if len(contornos) == 0:
+            continue
+        
+        # Crear máscara rellena: dibujar contorno FILLED
+        mascara_rellena = np.zeros_like(mascara_nucleo)
+        cv2.drawContours(mascara_rellena, contornos, -1, 255, thickness=cv2.FILLED)
+        
+        # Actualizar markers: donde está relleno, poner ID del núcleo
+        markers_rellenos[mascara_rellena > 0] = nucleo_id
+    
+    return markers_rellenos
+
+
 def crear_imagen_segmentada(markers, imagen_original):
     # COLOREADA: Asignar color aleatorio a cada núcleo
     imagen_coloreada = np.zeros_like(imagen_original)
@@ -241,7 +287,7 @@ def guardar_resultados(
 def procesar_imagen(ruta_imagen):
     nombre_imagen = os.path.basename(ruta_imagen)
 
-    # PIPELINE V1.2
+    # PIPELINE V1.5
     imagen_original, imagen_gris = cargar_imagen(ruta_imagen)
     imagen_combinada, imagen_otsu, imagen_local = aplicar_umbralizacion(imagen_gris)
     
@@ -254,8 +300,11 @@ def procesar_imagen(ruta_imagen):
     else:
         imagen_para_watershed = imagen_combinada
     
-    # V1.2: Watershed en vez de Region Growing
+    # V1.4: Watershed con parámetros ajustados
     markers = aplicar_watershed(imagen_para_watershed)
+    
+    # V1.5: Rellenar huecos de núcleos YA segmentados (seguro, no fusiona)
+    markers = rellenar_huecos_nucleos(markers)
 
     # Calcular núcleos
     ids_nucleos = np.unique(markers)
