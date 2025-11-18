@@ -326,20 +326,34 @@ Todos los parámetros son globales:
 
 **Dataset:** 30 imágenes H&E del dataset MoNuSeg
 
-### Segmentación píxel a píxel
+### 1. Métricas de Segmentación (píxel a píxel)
 | Métrica | Valor | Interpretación |
 |---------|-------|----------------|
 | **F1-Score** | **72.89%** | Balance precision-recall |
 | **IoU** | **57.99%** | Intersection over Union global |
-| **Precision** | **67.76%** | De los píxeles detectados, 68% correctos |
-| **Recall** | **81.56%** | Se detecta el 82% de los píxeles de núcleos |
-| **Accuracy** | **85.18%** | 85% de píxeles correctamente clasificados |
+| **Precision** | **67.76%** | Píxeles detectados correctos |
+| **Recall** | **81.56%** | Píxeles reales detectados |
+| **Accuracy** | **85.18%** | Píxeles correctos global |
 
 **Distribución F1:**
 - Excelente (≥90%): 0 imágenes
 - Bueno (70-90%): **18 imágenes** ✅
 - Regular (50-70%): **12 imágenes**
 - Malo (<50%): **0 imágenes** ✅
+
+### 2. Métricas de Conteo (número de núcleos)
+| Métrica | Valor |
+|---------|-------|
+| **Núcleos GT** | **723.8** (media) |
+| **Núcleos Pred** | **341.9** (media) |
+| **Precision Conteo** | **50.24%** |
+
+### 3. Métricas de Área (px²)
+| Métrica | Valor |
+|---------|-------|
+| **Área Media GT** | **463.47 px²** |
+| **Área Media Pred** | **1421.44 px²** |
+| **Diferencia** | **957.97 px² (206.7%)** |
 
 ### Mejores y peores casos
 
@@ -348,11 +362,6 @@ Todos los parámetros son globales:
 
 **Peor F1:**
 - TCGA-G9-6363-01Z-00-DX1.png: F1 53.2% (GT:354 Pred:283)
-
-### Conteo
-| Métrica | Valor |
-|---------|-------|
-| **Precision conteo** | **50.24%** |
 
 ## Comparación V1.1 vs V1.2
 

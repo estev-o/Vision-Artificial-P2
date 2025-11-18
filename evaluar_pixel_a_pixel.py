@@ -224,19 +224,29 @@ def mostrar_resumen(resultados):
     recall_medio = np.mean([r['recall'] for r in resultados])
     accuracy_medio = np.mean([r['accuracy'] for r in resultados])
     precision_conteo_medio = np.mean([r['precision_conteo'] for r in resultados])
+    area_media_gt = np.mean([r['area_media_gt'] for r in resultados])
+    area_media_pred = np.mean([r['area_media_pred'] for r in resultados])
     
     print("\n" + "="*60)
-    print("  EVALUACION PIXEL A PIXEL - RESULTADOS GLOBALES")
+    print("  EVALUACIÓN CUANTITATIVA - RESULTADOS GLOBALES")
     print("="*60)
-    print(f"\n1. SEGMENTACION (píxel a píxel):")
+    
+    print(f"\n1. MÉTRICAS DE SEGMENTACIÓN (píxel a píxel):")
     print(f"   F1-Score:    {f1_medio*100:.2f}%  (balance precision-recall)")
     print(f"   IoU:         {iou_medio*100:.2f}%  (Intersection over Union)")
-    print(f"   Precision:   {precision_medio*100:.2f}%  (de los píxeles detectados, cuántos correctos)")
-    print(f"   Recall:      {recall_medio*100:.2f}%  (de los píxeles reales, cuántos detectados)")
+    print(f"   Precision:   {precision_medio*100:.2f}%  (píxeles detectados correctos)")
+    print(f"   Recall:      {recall_medio*100:.2f}%  (píxeles reales detectados)")
     print(f"   Accuracy:    {accuracy_medio*100:.2f}%  (píxeles correctos global)")
     
-    print(f"\n2. CONTEO:")
-    print(f"   Precision:   {precision_conteo_medio:.2f}%")
+    print(f"\n2. MÉTRICAS DE CONTEO (número de núcleos):")
+    print(f"   Núcleos GT:       {np.mean([r['num_nucleos_gt'] for r in resultados]):.1f} (media)")
+    print(f"   Núcleos Pred:     {np.mean([r['num_nucleos_pred'] for r in resultados]):.1f} (media)")
+    print(f"   Precision Conteo: {precision_conteo_medio:.2f}%")
+    
+    print(f"\n3. MÉTRICAS DE ÁREA (px²):")
+    print(f"   Área Media GT:   {area_media_gt:.2f} px²")
+    print(f"   Área Media Pred: {area_media_pred:.2f} px²")
+    print(f"   Diferencia:      {abs(area_media_gt - area_media_pred):.2f} px² ({abs(1 - area_media_pred/area_media_gt)*100:.1f}%)")
     
     # Distribución F1
     excelente = sum(1 for r in resultados if r['f1'] >= 0.9)
