@@ -7,7 +7,7 @@ import xml.etree.ElementTree as ET
 # ==================== PARÁMETROS ====================
 XML_DIR = "Material Celulas/xml"
 GT_COLORS_DIR = "Material Celulas/gt_colors"
-OUTPUT_DIR = "out"
+OUTPUT_DIR = "visualizaciones"
 RESULTADOS_CSV = "resultados.csv"
 OUTPUT_CSV = "evaluacion.csv"  # Nombre unificado
 # ====================================================
