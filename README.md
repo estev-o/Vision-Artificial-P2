@@ -1296,3 +1296,60 @@ Solo usar V2.0 si conteo/área son absolutamente críticos.
 
 **"73.85% F1, 88% recall, 200 líneas. Segmentación científica moderna."** 🔬
 ````
+
+# V3.1 
+Mejoras que pueden resultar muy útiles_
+1. Post procesado después del watershed, podemos calcular el número de píxeles que se toca con otra, y si es relevante se une (con cuidado de no unir células independientes que se pueden tocar), tiene que ser relativo a lo grande que es
+
+2. Después, se puede sacar el contorno de la célula, sabemos que todo adentro estará unido así que lo rellenamos para evitar que haya espacio en el medio sin cubrir
+````
+
+# V3.2 - Combinación: V3.0 + cambios de forma + V3.1
+
+V3.2 integra la base moderna y concisa de V3.0 (scikit-image) con dos mejoras clave:
+
+- Pre-suavizado basado en la forma antes del cálculo de marcadores (cambios de forma):
+  - Opción A: opening seguido de closing (kernel en función del radio mediano del GT)
+  - Opción B: suavizado Gaussiano del mapa de distancia para obtener marcadores más redondeados
+  - Opción C (opcional): marcadores por erosión con disco (markers erosionados)
+
+- Post-procesado V3.1 (seguro):
+  - Unión inteligente de fragmentos que comparten frontera significativa (ratio relativo al perímetro)
+  - Relleno por contorno de cada etiqueta para eliminar huecos internos
+
+Objetivo: mantener el alto recall y F1 de V3.0 mientras reducimos el sesgo de área y corregimos fragmentación localizada.
+
+Parámetros por defecto (V3.2):
+
+```text
+MIN_DISTANCE = 5
+AREA_MIN_NUCLEO = 50
+PRE_SMOOTH = 'dist_smooth'  # 'morph_open_close' | 'dist_smooth' | 'erosion_markers' | None
+DIST_SMOOTH_SIGMA = 1.2
+MORPH_RADIUS_FACTOR = 0.15
+BASELINE = 'v3.2'
+USAR_UNION_FRAGMENTOS = True
+USAR_RELLENO_CONTORNO = True
+```
+
+Resultados esperados y notas de uso:
+
+- Riesgo/beneficio
+  - El pre-suavizado de distancia (B) tiende a mejorar la localización de centros sin unir objetos; es el recomendado como primer intento.
+  - El opening+closing (A) puede corregir protuberancias finas, pero si el kernel es grande puede unir núcleos cercanos — usar factor conservador.
+  - La unión inteligente + relleno no fusionan núcleos distintos si el umbral relativo de contacto se mantiene conservador (ej. 0.2).
+
+- Validación recomendada
+  - Ejecutar V3.2 en un subset representativo (10–30 imágenes) y comparar contra V3.0/V3.1 con métricas: F1, IoU, Precision, Recall, Núcleos Pred, Área Media y visualizaciones.
+
+Implementación
+
+La implementación de V3.2 está incluida en `segmentacion_nucleos.py` (BASELINE='v3.2').
+
+```text
+python3 segmentacion_nucleos.py
+```
+
+Esto generará las visualizaciones en `visualizaciones/<imagen>/` y el `resultados.csv` para evaluación con `evaluar_pixel_a_pixel.py`.
+
+---

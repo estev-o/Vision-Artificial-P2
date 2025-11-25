@@ -1,6 +1,6 @@
 .PHONY: all segmentar evaluar visualizar limpiar reiniciar
 
-all: segmentar evaluar
+all: segmentar evaluar visualizar
 
 segmentar:
 	@.venv/bin/python segmentacion_nucleos.py
@@ -13,7 +13,6 @@ visualizar:
 
 limpiar:
 	@rm -rf out visualizaciones
-	@mkdir -p out
 	@rm -f resultados.csv evaluacion.csv
 
 reiniciar: limpiar all

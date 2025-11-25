@@ -175,7 +175,7 @@ def generar_grid_completo(imagen_gris, mascara_binaria, mapa_distancia,
     return grid
 
 
-def procesar_imagen(nombre_imagen, verbose=True):
+def procesar_imagen(nombre_imagen, verbose=False):
     """
     Genera todas las visualizaciones para una imagen específica
     """

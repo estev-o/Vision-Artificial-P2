@@ -6,13 +6,20 @@ from pathlib import Path
 from scipy import ndimage
 from skimage import filters, morphology, segmentation, feature, util, measure
 
-# ==================== PARÁMETROS (Watershed + Distancia) ====================
-# Configuración óptima basada en experimentos exhaustivos:
-# - MIN_DISTANCE=5: Balance óptimo entre sobre/sub-segmentación (F1: 73.85%)
-# - remove_small_holes: Mejora morfología interna sin fusionar núcleos cercanos
-# - Basado en análisis GT: 16,819 núcleos, área media 432 px², diámetro ~23.5 px
+# ========================= Parámetros Globales ==============================
 MIN_DISTANCE = 5  # Distancia mínima entre picos (evita sobre-segmentación)
 AREA_MIN_NUCLEO = 50  # Filtro de ruido (P5 del GT = 80 px², usamos 50 para recall)
+
+# Umbralización local
+BLOCK_SIZE = 51  # Tamaño ventana adaptativa (debe ser impar)
+C_CONSTANT = 2   # Constante de ajuste para threshold local
+
+# Post-procesamiento V3.1 (unión inteligente de fragmentos)
+THRESHOLD_CONTACTO = 0.2  # Si contacto > 20% del perímetro menor → fusionar (más agresivo)
+USAR_UNION_FRAGMENTOS = True  # Activar/desactivar unión post-watershed
+
+# Post-procesamiento V3.1 (relleno de contorno robusto)
+USAR_RELLENO_CONTORNO = True  # Rellenar núcleos por contorno (más robusto que remove_small_holes)
 
 # Directorios
 INPUT_DIR = "Material Celulas/H"
@@ -20,6 +27,10 @@ OUTPUT_DIR = "visualizaciones"
 GT_DIR = "Material Celulas/gt_colors"
 RESULTADOS_CSV = "resultados.csv"
 # ============================================================================
+
+# Parámetros de suavizado
+DIST_SMOOTH_SIGMA = 1.2  # sigma para gaussian smoothing del mapa de distancia
+# ---------------------------------------------------------------------------
 
 
 def cargar_imagen(ruta_imagen):
@@ -31,40 +42,221 @@ def cargar_imagen(ruta_imagen):
 
 
 def pipeline_watershed_distancia(imagen_gris):
-    """
-    Pipeline de segmentación basado en Watershed + Distance Transform.
-    
-    Configuración óptima (F1: 73.85%, Recall: 88.35%, IoU: 59.19%):
-    - Otsu global para umbralización robusta en H&E
-    - remove_small_holes: Rellena huecos internos mejorando morfología
-    - Distance Transform + peak_local_max: Genera markers adaptativos
-    - MIN_DISTANCE=5: Evita sobre-segmentación manteniendo alto recall
-    - Watershed: Separación final basada en gradiente de distancia
-    
-    Trade-off conocido: Área ~2x mayor que GT (fusiona núcleos muy cercanos)
-    pero excelente F1 y recall por detección robusta.
-    """
-    # 1. Otsu Global (Estándar robusto para Hematoxilina)
+    # 1. Otsu Global
     thresh_val = filters.threshold_otsu(imagen_gris)
     mask = imagen_gris < thresh_val
-
-    # 2. Limpieza Morfológica
+    
+    # 2. Limpieza Morfológica (base V3.0 según README)
+    # 2.1 eliminar objetos pequeños
     mask = morphology.remove_small_objects(mask, min_size=AREA_MIN_NUCLEO)
-    mask = morphology.remove_small_holes(mask, area_threshold=AREA_MIN_NUCLEO)
 
-    # 3. Transformada de Distancia
+    # 2.2 rellenar huecos pequeños dentro de núcleos (mejora morfología interna)
+    mask = morphology.remove_small_holes(mask, area_threshold=50)
+
+    # 2.3 erosión suave para reducir halos (mejora precisión de área)
+    kernel = np.ones((2, 2), np.uint8)
+    mask = cv2.erode(mask.astype(np.uint8), kernel, iterations=1)
+    mask = mask > 0  # volver a booleano
+
+    # 3. Transformada de Distancia y detección de picos (marcadores)
     distance = ndimage.distance_transform_edt(mask)
+    # Suavizar el mapa de distancia para obtener marcadores más redondeados (V3.2)
+    distance_smooth = ndimage.gaussian_filter(distance, sigma=DIST_SMOOTH_SIGMA)
+    coords = feature.peak_local_max(distance_smooth, min_distance=MIN_DISTANCE, labels=mask)
 
-    # 4. Detección de Picos (Markers)
-    coords = feature.peak_local_max(distance, min_distance=MIN_DISTANCE, labels=mask)
+    # 5. Detección de Picos (Markers) -> convertir coords a marcadores etiquetados
     mask_peaks = np.zeros(distance.shape, dtype=bool)
-    mask_peaks[tuple(coords.T)] = True
+    if hasattr(coords, 'size') and coords.size > 0:
+        # coords es array (N,2)
+        try:
+            mask_peaks[tuple(coords.T)] = True
+        except Exception:
+            # En casos raros coords puede ser lista de tuplas
+            for (r, c) in coords:
+                mask_peaks[int(r), int(c)] = True
+
     markers, _ = ndimage.label(mask_peaks)
 
-    # 5. Watershed
+    # 6. Watershed (usar la distancia original para el watershed para preservar bordes)
     labels = segmentation.watershed(-distance, markers, mask=mask)
 
     return labels, mask, distance
+
+
+def unir_fragmentos_inteligente(labels):
+    """
+    V3.1: Une núcleos fragmentados que comparten frontera significativa.
+    
+    Criterio: Si (píxeles_contacto / perímetro_menor) > THRESHOLD_CONTACTO
+             → Son el mismo núcleo fragmentado, fusionar.
+    
+    Optimización: Solo compara núcleos que realmente se tocan.
+    """
+    if not USAR_UNION_FRAGMENTOS:
+        return labels
+    
+    labels_copia = labels.copy()
+    
+    # Encontrar vecinos (núcleos que se tocan) usando dilatación
+    kernel = np.ones((3, 3), np.uint8)
+    
+    # Para cada label, encontrar sus vecinos directos
+    unique_labels = np.unique(labels_copia)
+    unique_labels = unique_labels[unique_labels != 0]  # Excluir fondo
+    
+    # Diccionario de vecinos: {label: set(vecinos)}
+    vecinos = {label: set() for label in unique_labels}
+    
+    for label in unique_labels:
+        # Máscara del núcleo actual
+        mask = (labels_copia == label).astype(np.uint8)
+        
+        # Dilatar 1 píxel
+        mask_dil = cv2.dilate(mask, kernel, iterations=1)
+        
+        # Encontrar qué otros núcleos toca
+        mask_borde = mask_dil - mask  # Solo el borde dilatado
+        labels_vecinos = labels_copia[mask_borde > 0]
+        
+        # Añadir vecinos (excluyendo fondo y sí mismo)
+        for vecino in np.unique(labels_vecinos):
+            if vecino != 0 and vecino != label:
+                vecinos[label].add(vecino)
+    
+    # Calcular propiedades una sola vez
+    props_dict = {prop.label: prop for prop in measure.regionprops(labels_copia)}
+    
+    # Procesar solo pares de vecinos (permitir fusiones encadenadas)
+    pares_procesados = set()
+    fusiones_realizadas = True
+    
+    # Iterar hasta que no haya más fusiones posibles
+    while fusiones_realizadas:
+        fusiones_realizadas = False
+        
+        for label_i in unique_labels:
+            # Obtener el label actual (puede haber cambiado por fusiones)
+            current_label_i = labels_copia[labels_copia == label_i]
+            if len(current_label_i) == 0:  # Ya fue fusionado completamente
+                continue
+            current_label_i = current_label_i[0]
+            
+            for label_j in vecinos[label_i]:
+                # Obtener el label actual de j
+                current_label_j = labels_copia[labels_copia == label_j]
+                if len(current_label_j) == 0:  # Ya fue fusionado completamente
+                    continue
+                current_label_j = current_label_j[0]
+                
+                # Si ya son el mismo, saltar
+                if current_label_i == current_label_j:
+                    continue
+                
+                # Evitar procesar el mismo par dos veces en esta iteración
+                par = tuple(sorted([current_label_i, current_label_j]))
+                if par in pares_procesados:
+                    continue
+                pares_procesados.add(par)
+                
+                # Verificar que ambos labels aún existen
+                if current_label_i not in props_dict or current_label_j not in props_dict:
+                    continue
+                
+                # Obtener propiedades actualizadas
+                prop_i = props_dict[current_label_i]
+                prop_j = props_dict[current_label_j]
+                
+                # Máscaras actuales
+                mask_i = (labels_copia == current_label_i)
+                mask_j = (labels_copia == current_label_j)
+                
+                # Dilatar ligeramente para contar contacto
+                mask_i_dil = cv2.dilate(mask_i.astype(np.uint8), kernel, iterations=1)
+                
+                # Contar píxeles de contacto
+                pixeles_contacto = np.sum(mask_i_dil & mask_j)
+                
+                if pixeles_contacto > 0:
+                    # Contacto relativo al perímetro más pequeño
+                    perimetro_min = min(prop_i.perimeter, prop_j.perimeter)
+                    
+                    if perimetro_min == 0:
+                        continue
+                    
+                    ratio_contacto = pixeles_contacto / perimetro_min
+                    
+                    # Si contacto es significativo → FUSIONAR
+                    if ratio_contacto > THRESHOLD_CONTACTO:
+                        # Fusionar: asignar todos los píxeles de j a i
+                        labels_copia[mask_j] = current_label_i
+                        fusiones_realizadas = True
+                        
+                        # Actualizar propiedades (recalcular para el núcleo fusionado)
+                        props_fusionado = measure.regionprops((labels_copia == current_label_i).astype(int))
+                        if props_fusionado:
+                            props_dict[current_label_i] = props_fusionado[0]
+                        
+                        # Marcar que j ya no existe
+                        if current_label_j in props_dict:
+                            del props_dict[current_label_j]
+        
+        # Limpiar pares procesados para la siguiente iteración
+        if fusiones_realizadas:
+            pares_procesados.clear()
+    
+    return labels_copia
+
+
+def rellenar_por_contorno(labels):
+    """
+    V3.1 Punto 2: Rellena núcleos usando sus contornos.
+    
+    Para cada núcleo:
+    1. Extrae su contorno externo
+    2. Rellena todo el interior del contorno
+    
+    Ventaja sobre remove_small_holes:
+    - Más robusto: rellena TODOS los huecos internos sin importar tamaño
+    - Núcleos más completos y realistas
+    - Área más precisa
+    """
+    if not USAR_RELLENO_CONTORNO:
+        return labels
+    
+    labels_rellenado = labels.copy()
+    
+    # Obtener labels únicos (excluyendo fondo)
+    unique_labels = np.unique(labels_rellenado)
+    unique_labels = unique_labels[unique_labels != 0]
+    
+    for label in unique_labels:
+        # Máscara del núcleo actual
+        mask_nucleo = (labels_rellenado == label).astype(np.uint8)
+        
+        # Encontrar contornos
+        contours, _ = cv2.findContours(
+            mask_nucleo, 
+            cv2.RETR_EXTERNAL,  # Solo contorno externo
+            cv2.CHAIN_APPROX_SIMPLE
+        )
+        
+        if contours:
+            # Crear máscara vacía
+            mask_rellenado = np.zeros_like(mask_nucleo)
+            
+            # Rellenar el contorno (todos los píxeles dentro)
+            cv2.drawContours(
+                mask_rellenado, 
+                contours, 
+                -1,  # Todos los contornos
+                1,   # Color (1 para máscara binaria)
+                cv2.FILLED  # Rellenar
+            )
+            
+            # Actualizar labels: asignar el label a todos los píxeles rellenados
+            labels_rellenado[mask_rellenado > 0] = label
+    
+    return labels_rellenado
 
 
 def crear_imagen_coloreada(labels, imagen_original):
@@ -108,6 +300,8 @@ def guardar_resultados_compatible(
 
     # GUARDAR IMÁGENES
     cv2.imwrite(f"{carpeta_imagen}/1_original_gris.png", imagen_gris)
+    cv2.imwrite(f"{carpeta_imagen}/2_mascara_binaria.png", mask_vis)
+    cv2.imwrite(f"{carpeta_imagen}/3_mapa_distancia.png", dist_vis_color)
 
     # ¡IMPORTANTE! Este es el nombre exacto que busca tu script de evaluación:
     cv2.imwrite(f"{carpeta_imagen}/4_coloreada.png", imagen_coloreada)
@@ -153,20 +347,24 @@ def procesar_todas_imagenes():
         try:
             nombre_img = ruta.name
 
-            # 1. Cargar
+            # 1. Cargar imagen
             imagen_original, imagen_gris = cargar_imagen(str(ruta))
 
-            # 2. Algoritmo Watershed + Distancia
+            # 2. Algoritmo Watershed + Distancia (V3.2 entregable)
             labels, mask, distance = pipeline_watershed_distancia(imagen_gris)
 
-            # 3. Colorear
+            # 3. Post-procesado: unir fragmentos significativos y rellenar por contorno
+            labels = unir_fragmentos_inteligente(labels)
+            labels = rellenar_por_contorno(labels)
+
+            # 5. Colorear
             imagen_coloreada = crear_imagen_coloreada(labels, imagen_original)
 
-            # 4. Estadísticas
+            # 6. Estadísticas
             props = measure.regionprops(labels)
             areas = [p.area for p in props]
 
-            # 5. Guardar
+            # 7. Guardar
             guardar_resultados_compatible(
                 nombre_img,
                 imagen_original,

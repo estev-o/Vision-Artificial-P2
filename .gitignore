@@ -1,4 +1,6 @@
 /.venv
 /Material Celulas
 /historial_info
-/out
+/visualizaciones
+resultados.csv
+evaluacion.csv
