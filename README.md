@@ -1353,3 +1353,41 @@ python3 segmentacion_nucleos.py
 Esto generará las visualizaciones en `visualizaciones/<imagen>/` y el `resultados.csv` para evaluación con `evaluar_pixel_a_pixel.py`.
 
 ---
+
+RESULTADOS FINALES:
+============================================================
+  EVALUACIÓN CUANTITATIVA - RESULTADOS GLOBALES
+============================================================
+
+1. MÉTRICAS DE SEGMENTACIÓN (píxel a píxel):
+   F1-Score:    74.19%  (balance precision-recall)
+   IoU:         59.57%  (Intersection over Union)
+   Precision:   69.33%  (píxeles detectados correctos)
+   Recall:      82.17%  (píxeles reales detectados)
+   Accuracy:    85.87%  (píxeles correctos global)
+
+2. MÉTRICAS DE CONTEO (número de núcleos):
+   Núcleos GT:       723.8 (media)
+   Núcleos Pred:     534.8 (media)
+   Precision Conteo: 70.01%
+
+3. MÉTRICAS DE ÁREA (px²):
+   Área Media GT:   463.47 px²
+   Área Media Pred: 663.38 px²
+   Diferencia:      199.91 px² (43.1%)
+
+============================================================
+Mejor resultado (F1):
+  TCGA-21-5784-01Z-00-DX1.png
+  F1: 85.2% (GT:757 Pred:409)
+
+Peor resultado (F1):
+  TCGA-G9-6363-01Z-00-DX1.png
+  F1: 51.1% (GT:354 Pred:561)
+
+============================================================
+
+
+# Idea Para un posible 3.3:
+Hacer una distinción entre usar otsu o otro algoritmo. 
+- Otsu funciona muy bien en las que solo hay 2 modas (plasma y núcleo). Pero en los que hay más de una moda (3 modas, núcleo (+oscura), algo que no es núcleo pero no es claro, y plasma). Se podría mejorar el resultado implementando un algoritmo que decida si usar Otsu o otro tipo de umbralización que se quede con la moda más oscura. El resto del pipeline está bien y ya no deberíamos tocarlo más.

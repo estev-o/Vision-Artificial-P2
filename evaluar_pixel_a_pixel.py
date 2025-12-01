@@ -254,12 +254,6 @@ def mostrar_resumen(resultados):
     regular = sum(1 for r in resultados if 0.5 <= r['f1'] < 0.7)
     malo = sum(1 for r in resultados if r['f1'] < 0.5)
     
-    print("\n" + "="*60)
-    print("Distribución F1-Score:")
-    print(f"  Excelente (>=90%):  {excelente} imagenes")
-    print(f"  Bueno (70-90%):     {bueno} imagenes")
-    print(f"  Regular (50-70%):   {regular} imagenes")
-    print(f"  Malo (<50%):        {malo} imagenes")
     
     # Mejor y peor
     mejor = max(resultados, key=lambda x: x['f1'])

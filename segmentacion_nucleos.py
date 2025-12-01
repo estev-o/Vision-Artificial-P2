@@ -46,7 +46,7 @@ def pipeline_watershed_distancia(imagen_gris):
     thresh_val = filters.threshold_otsu(imagen_gris)
     mask = imagen_gris < thresh_val
     
-    # 2. Limpieza Morfológica (base V3.0 según README)
+    # 2. Limpieza Morfológica
     # 2.1 eliminar objetos pequeños
     mask = morphology.remove_small_objects(mask, min_size=AREA_MIN_NUCLEO)
 
@@ -350,7 +350,7 @@ def procesar_todas_imagenes():
             # 1. Cargar imagen
             imagen_original, imagen_gris = cargar_imagen(str(ruta))
 
-            # 2. Algoritmo Watershed + Distancia (V3.2 entregable)
+            # 2. Algoritmo Watershed + Distancia
             labels, mask, distance = pipeline_watershed_distancia(imagen_gris)
 
             # 3. Post-procesado: unir fragmentos significativos y rellenar por contorno
