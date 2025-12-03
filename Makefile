@@ -3,13 +3,13 @@
 all: segmentar evaluar visualizar
 
 segmentar:
-	@.venv/bin/python segmentacion_nucleos.py
+	@.venv/bin/python segmentar.py
 
 evaluar:
-	@.venv/bin/python evaluar_pixel_a_pixel.py
+	@.venv/bin/python evaluar.py
 
 visualizar:
-	@.venv/bin/python generar_visualizaciones.py
+	@.venv/bin/python visualizar.py
 
 limpiar:
 	@rm -rf out visualizaciones
