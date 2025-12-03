@@ -4,15 +4,18 @@ import os
 import csv
 from pathlib import Path
 from scipy import ndimage
+from scipy.signal import find_peaks
 from skimage import filters, morphology, segmentation, feature, util, measure
 
 # ========================= Parámetros Globales ==============================
 MIN_DISTANCE = 5  # Distancia mínima entre picos (evita sobre-segmentación)
 AREA_MIN_NUCLEO = 50  # Filtro de ruido (P5 del GT = 80 px², usamos 50 para recall)
 
-# Umbralización local
-BLOCK_SIZE = 51  # Tamaño ventana adaptativa (debe ser impar)
-C_CONSTANT = 2   # Constante de ajuste para threshold local
+# Umbralización adaptativa por modas (V3.3)
+DETECTAR_MODAS = True  # Decide entre Otsu y Multi-Otsu según número de modas
+PROMINENCIA_MODAS = 0.001  # Sensibilidad para detectar picos en histograma
+DISTANCIA_MODAS = 5  # Separación mínima entre picos
+SIGMA_HIST = 1.5  # Suavizado del histograma antes de buscar modas
 
 # Post-procesamiento V3.1 (unión inteligente de fragmentos)
 THRESHOLD_CONTACTO = 0.2  # Si contacto > 20% del perímetro menor → fusionar (más agresivo)
@@ -41,12 +44,46 @@ def cargar_imagen(ruta_imagen):
     return imagen_color, imagen_gris
 
 
+
+
+
+def detectar_modas_hist(imagen_gris):
+    """
+    Detecta el número de modas del histograma y decide el umbral:
+    - 2 modas → Otsu
+    - ≥3 modas → Multi-Otsu (toma la clase más oscura)
+    """
+    if not DETECTAR_MODAS:
+        umbral = filters.threshold_otsu(imagen_gris)
+        return 2, umbral, "otsu_forzado"
+
+    hist, _ = np.histogram(imagen_gris, bins=256, range=(0, 255), density=True)
+    hist_smooth = ndimage.gaussian_filter1d(hist, sigma=SIGMA_HIST)
+    peaks, _ = find_peaks(
+        hist_smooth, prominence=PROMINENCIA_MODAS, distance=DISTANCIA_MODAS
+    )
+    num_picos = len(peaks)
+
+    if num_picos >= 3:
+        try:
+            thresholds = filters.threshold_multiotsu(imagen_gris, classes=3)
+            umbral = thresholds[0]  # Clase más oscura
+            metodo = "multiotsu_3clases"
+        except Exception:
+            umbral = filters.threshold_otsu(imagen_gris)
+            metodo = "multiotsu_fallback_otsu"
+    else:
+        umbral = filters.threshold_otsu(imagen_gris)
+        metodo = "otsu"
+
+    return num_picos, umbral, metodo
+
 def pipeline_watershed_distancia(imagen_gris):
-    # 1. Otsu Global
-    thresh_val = filters.threshold_otsu(imagen_gris)
+    # 1. Umbral adaptativo según número de modas
+    num_picos, thresh_val, metodo_umbral = detectar_modas_hist(imagen_gris)
     mask = imagen_gris < thresh_val
     
-    # 2. Limpieza Morfológica
+    # 2. Limpieza Morfológica (base V3.0 según README)
     # 2.1 eliminar objetos pequeños
     mask = morphology.remove_small_objects(mask, min_size=AREA_MIN_NUCLEO)
 
@@ -80,7 +117,7 @@ def pipeline_watershed_distancia(imagen_gris):
     # 6. Watershed (usar la distancia original para el watershed para preservar bordes)
     labels = segmentation.watershed(-distance, markers, mask=mask)
 
-    return labels, mask, distance
+    return labels, mask, distance, {"metodo": metodo_umbral, "umbral": float(thresh_val), "modas": num_picos}
 
 
 def unir_fragmentos_inteligente(labels):
@@ -350,8 +387,8 @@ def procesar_todas_imagenes():
             # 1. Cargar imagen
             imagen_original, imagen_gris = cargar_imagen(str(ruta))
 
-            # 2. Algoritmo Watershed + Distancia
-            labels, mask, distance = pipeline_watershed_distancia(imagen_gris)
+            # 2. Algoritmo Watershed + Distancia (V3.2 entregable)
+            labels, mask, distance, info_umbral = pipeline_watershed_distancia(imagen_gris)
 
             # 3. Post-procesado: unir fragmentos significativos y rellenar por contorno
             labels = unir_fragmentos_inteligente(labels)
@@ -383,7 +420,7 @@ def procesar_todas_imagenes():
                     "areas_individuales": areas,
                 }
             )
-            print("OK")
+            print(f"OK (umbral={info_umbral['metodo']} modas={info_umbral['modas']} thr={info_umbral['umbral']:.1f})")
 
         except Exception as e:
             print(f"ERROR: {e}")

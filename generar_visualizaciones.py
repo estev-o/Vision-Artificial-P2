@@ -26,6 +26,7 @@ import argparse
 OUTPUT_DIR = "visualizaciones"
 GT_COLORS_DIR = "Material Celulas/gt_colors"
 VISUALIZACIONES_DIR = "visualizaciones"
+RESULTADOS_DIR = Path(VISUALIZACIONES_DIR) / "RESULTADOS"
 # =======================================================
 
 
@@ -190,6 +191,7 @@ def procesar_imagen(nombre_imagen, verbose=False):
     carpeta_out = Path(OUTPUT_DIR) / nombre_base
     carpeta_vis = Path(VISUALIZACIONES_DIR) / nombre_base
     carpeta_vis.mkdir(parents=True, exist_ok=True)
+    RESULTADOS_DIR.mkdir(parents=True, exist_ok=True)
     
     # ========== CARGAR IMÁGENES ==========
     
@@ -268,8 +270,11 @@ def procesar_imagen(nombre_imagen, verbose=False):
                                 pred_color, gt_color, imagen_diferencias)
     ruta_grid = carpeta_vis / "grid_completo.png"
     cv2.imwrite(str(ruta_grid), grid)
+    ruta_grid_resumen = RESULTADOS_DIR / f"{nombre_base}_grid.png"
+    cv2.imwrite(str(ruta_grid_resumen), grid)
     if verbose:
         print(f"  ✓ Grid completo: {ruta_grid}")
+        print(f"  ✓ Grid resumen: {ruta_grid_resumen}")
     
     if verbose:
         print(f"\n✅ Visualizaciones generadas en: {carpeta_vis}/")
