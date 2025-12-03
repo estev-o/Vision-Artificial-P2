@@ -1388,6 +1388,65 @@ Peor resultado (F1):
 ============================================================
 
 
-# Idea Para un posible 3.3:
-Hacer una distinción entre usar otsu o otro algoritmo. 
-- Otsu funciona muy bien en las que solo hay 2 modas (plasma y núcleo). Pero en los que hay más de una moda (3 modas, núcleo (+oscura), algo que no es núcleo pero no es claro, y plasma). Se podría mejorar el resultado implementando un algoritmo que decida si usar Otsu o otro tipo de umbralización que se quede con la moda más oscura. El resto del pipeline está bien y ya no deberíamos tocarlo más.
+# V 3.3:
+
+
+RESULTADOS FINALES DEL 3.3
+============================================================
+  EVALUACIÓN CUANTITATIVA - RESULTADOS GLOBALES
+============================================================
+
+1. MÉTRICAS DE SEGMENTACIÓN (píxel a píxel):
+   F1-Score:    71.42%  (balance precision-recall)
+   IoU:         56.41%  (Intersection over Union)
+   Precision:   72.74%  (píxeles detectados correctos)
+   Recall:      74.40%  (píxeles reales detectados)
+   Accuracy:    85.70%  (píxeles correctos global)
+
+2. MÉTRICAS DE CONTEO (número de núcleos):
+   Núcleos GT:       723.8 (media)
+   Núcleos Pred:     561.3 (media)
+   Precision Conteo: 71.13%
+
+3. MÉTRICAS DE ÁREA (px²):
+   Área Media GT:   463.47 px²
+   Área Media Pred: 523.91 px²
+   Diferencia:      60.44 px² (13.0%)
+
+============================================================
+Mejor resultado (F1):
+  TCGA-21-5784-01Z-00-DX1.png
+  F1: 85.2% (GT:757 Pred:409)
+
+Peor resultado (F1):
+  TCGA-21-5786-01Z-00-DX1.png
+  F1: 44.2% (GT:440 Pred:624)
+
+============================================================
+
+# Resumen detallado pipeline V3.3 (actual)
+- Segmentación (`segmentacion_nucleos.py`)
+  - `detectar_modas_hist`: analiza histograma H (suavizado) y elige Otsu (2 picos) o Multi-Otsu 3 clases (≥3 picos), tomando la clase más oscura como umbral por imagen.
+  - `pipeline_watershed_distancia`: binariza (umbral elegido), limpia (remove_small_objects/holes, erosión 2×2), calcula EDT + suavizado, detecta picos con `peak_local_max` (MIN_DISTANCE), crea marcadores, aplica watershed sobre `-distance` y máscara.
+  - `unir_fragmentos_inteligente`: fusiona labels que comparten borde significativo (ratio de contacto > THRESHOLD_CONTACTO) para evitar sobre-segmentación.
+  - `rellenar_por_contorno`: rellena huecos internos por contorno externo de cada label si está activado (USAR_RELLENO_CONTORNO).
+  - `crear_imagen_coloreada`/`guardar_resultados_compatible`: colorea cada label, guarda pasos intermedios (`1_original_gris.png`, `2_mascara_binaria.png`, `3_mapa_distancia.png`, `4_coloreada.png`) en `visualizaciones/<img>/` y registra estadísticas en `resultados.csv`.
+  - `procesar_todas_imagenes`: orquesta el flujo sobre todo `Material Celulas/H/*.png`.
+
+- Evaluación (`evaluar_pixel_a_pixel.py`)
+  - `binarizar_imagen`: normaliza pred/GT coloreados a binario.
+  - `calcular_metricas_pixel`: F1/Dice, IoU, precision, recall, accuracy (píxel a píxel).
+  - `evaluar_imagen`: usa `4_coloreada.png` y `gt_colors`, ajusta tamaño si difiere, obtiene conteo GT desde XML, CC en pred, compara áreas medias; devuelve métricas por imagen.
+  - `evaluar_todas_imagenes`: recorre `resultados.csv` (Imagen), evalúa todas y guarda `evaluacion.csv` con resumen global.
+
+- Visualización (`generar_visualizaciones.py`)
+  - `generar_imagen_diferencias`: mapa FP/FN/TP (azul/rojo/verde).
+  - `generar_contornos_superpuestos`: contornos GT (rojo) y pred (verde) sobre gris.
+  - `generar_comparativa_lado_a_lado`: pred vs GT.
+  - `generar_grid_completo`: grid 2×2 (gris, máscara, coloreada, diferencias); se guarda en `visualizaciones/<img>/grid_completo.png` y copia en `visualizaciones/RESULTADOS/{nombre}_grid.png`.
+  - `main/listar_imagenes_disponibles/procesar_imagen`: permiten procesar todas o una imagen concreta y listar disponibles.
+
+- Automatización (Makefile)
+  - `make segmentar` → ejecuta `segmentacion_nucleos.py` sobre todo el lote.
+  - `make evaluar` → ejecuta `evaluar_pixel_a_pixel.py` y genera `evaluacion.csv`.
+  - `make visualizar` → ejecuta `generar_visualizaciones.py` y crea grids/resultados.
