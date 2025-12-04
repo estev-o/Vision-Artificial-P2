@@ -30,7 +30,6 @@ SIGMA_HIST = 1.5            # Suavizado del histograma
 
 # Post-procesado
 THRESHOLD_CONTACTO = 0.2    # Fusión si contacto > 20% del perímetro
-USAR_RELLENO_CONTORNO = True
 
 # Directorios
 INPUT_DIR = "Material Celulas/H"
@@ -84,7 +83,7 @@ def pipeline_watershed(imagen_gris: np.ndarray):
     # 3) Distancia + picos -> marcadores
     distance = ndimage.distance_transform_edt(mask)
     distance_smooth = ndimage.gaussian_filter(distance, sigma=DIST_SMOOTH_SIGMA)
-    coords = feature.peak_local_max(distance_smooth, min_distance=MIN_DISTANCE, labels=mask)
+    coords = feature.peak_local_max(distance_smooth, min_distance=MIN_DISTANCE, res_wtrshd=mask)
 
     # Máscara booleana con 1 píxel True por cada pico detectado (candidatos a semilla)
     mask_peaks = np.zeros(distance.shape, dtype=bool)
@@ -95,52 +94,55 @@ def pipeline_watershed(imagen_gris: np.ndarray):
     markers, _ = ndimage.label(mask_peaks)
 
     # 4) Watershed
-    labels = segmentation.watershed(-distance, markers, mask=mask)
+    res_wtrshd = segmentation.watershed(-distance, markers, mask=mask)
 
     info = {"metodo": metodo_umbral, "filtro": float(umbral), "modas": num_picos}
-    # labels: imagen segmentada mask: máscara binaria pre watershed distance: mapa de distancia info: info del filtro
-    return labels, mask, distance, info
+    # res_wtrshd: imagen segmentada mask: máscara binaria pre watershed distance: mapa de distancia info: info del filtro
+    return res_wtrshd, mask, distance, info
 
 
-def unir_fragmentos(labels: np.ndarray):
+def unir_fragmentos(res_wtrshd: np.ndarray):
     #Fusiona núcleos que comparten borde significativo (contacto relativo > THRESHOLD_CONTACTO)
-    labels_copia = labels.copy()
+    res_wtrshd_copia = res_wtrshd.copy()
     kernel = np.ones((3, 3), np.uint8)
-    unique_labels = np.unique(labels_copia)
-    unique_labels = unique_labels[unique_labels != 0]
+    unique_res_wtrshd = np.unique(res_wtrshd_copia)
+    unique_res_wtrshd = unique_res_wtrshd[unique_res_wtrshd != 0]
 
-    vecinos = {label: set() for label in unique_labels}
-    for label in unique_labels:
-        mask = (labels_copia == label).astype(np.uint8)
-        mask_dil = cv2.dilate(mask, kernel, iterations=1)
-        mask_borde = mask_dil - mask
-        labels_vecinos = labels_copia[mask_borde > 0]
-        for vecino in np.unique(labels_vecinos):
+    # Encontrar vecinos de cada núcleo (solo los que se tocan)
+    vecinos = {label: set() for label in unique_res_wtrshd}
+    for label in unique_res_wtrshd:
+        mask = (res_wtrshd_copia == label).astype(np.uint8)
+        mask_dil = cv2.dilate(mask, kernel, iterations=1)  # Expandir 1 píxel
+        mask_borde = mask_dil - mask  # Solo el borde expandido
+        res_wtrshd_vecinos = res_wtrshd_copia[mask_borde > 0]  # Qué res_wtrshd toca
+        for vecino in np.unique(res_wtrshd_vecinos):
             if vecino != 0 and vecino != label:
                 vecinos[label].add(vecino)
 
-    props_dict = {prop.label: prop for prop in measure.regionprops(labels_copia)}
+    # Calcular propiedades (área, perímetro) de cada núcleo
+    props_dict = {prop.label: prop for prop in measure.regionprops(res_wtrshd_copia)}
     pares_procesados = set()
     fusiones_realizadas = True
 
+    # Repetir mientras se sigan fusionando núcleos
     while fusiones_realizadas:
         fusiones_realizadas = False
-        for label_i in list(unique_labels):
-            current_label_i = labels_copia[labels_copia == label_i]
-            if current_label_i.size == 0:
+        for label_i in list(unique_res_wtrshd):
+            current_label_i = res_wtrshd_copia[res_wtrshd_copia == label_i]
+            if current_label_i.size == 0:  # Ya fusionado
                 continue
             current_label_i = current_label_i[0]
 
             for label_j in vecinos[label_i]:
-                current_label_j = labels_copia[labels_copia == label_j]
-                if current_label_j.size == 0:
+                current_label_j = res_wtrshd_copia[res_wtrshd_copia == label_j]
+                if current_label_j.size == 0:  # Ya fusionado
                     continue
                 current_label_j = current_label_j[0]
-                if current_label_i == current_label_j:
+                if current_label_i == current_label_j:  # Ya son el mismo
                     continue
 
                 par = tuple(sorted([current_label_i, current_label_j]))
-                if par in pares_procesados:
+                if par in pares_procesados:  # Ya evaluado en esta ronda
                     continue
                 pares_procesados.add(par)
 
@@ -149,68 +151,72 @@ def unir_fragmentos(labels: np.ndarray):
 
                 prop_i = props_dict[current_label_i]
                 prop_j = props_dict[current_label_j]
-                mask_i = labels_copia == current_label_i
-                mask_j = labels_copia == current_label_j
+                mask_i = res_wtrshd_copia == current_label_i
+                mask_j = res_wtrshd_copia == current_label_j
+                # Dilatar i y contar cuántos píxeles de j toca
                 mask_i_dil = cv2.dilate(mask_i.astype(np.uint8), kernel, iterations=1)
                 pixeles_contacto = np.sum(mask_i_dil & mask_j)
                 if pixeles_contacto == 0:
                     continue
 
+                # Contacto relativo al perímetro del más pequeño
                 perimetro_min = min(prop_i.perimeter, prop_j.perimeter)
                 if perimetro_min == 0:
                     continue
                 ratio_contacto = pixeles_contacto / perimetro_min
 
+                # Si el contacto es > 20% del perímetro menor -> fusionar
                 if ratio_contacto > THRESHOLD_CONTACTO:
-                    labels_copia[mask_j] = current_label_i
+                    res_wtrshd_copia[mask_j] = current_label_i  # j pasa a ser i
                     fusiones_realizadas = True
-                    props_fusionado = measure.regionprops((labels_copia == current_label_i).astype(int))
+                    # Recalcular propiedades del núcleo fusionado
+                    props_fusionado = measure.regionprops((res_wtrshd_copia == current_label_i).astype(int))
                     if props_fusionado:
                         props_dict[current_label_i] = props_fusionado[0]
                     if current_label_j in props_dict:
                         del props_dict[current_label_j]
 
         if fusiones_realizadas:
-            pares_procesados.clear()
+            pares_procesados.clear()  # Reiniciar para la siguiente ronda
 
-    return labels_copia
+    return res_wtrshd_copia
 
 
-def rellenar_por_contorno(labels: np.ndarray):
-    """Rellena huecos internos usando el contorno externo de cada label (si está activado)."""
-    if not USAR_RELLENO_CONTORNO:
-        return labels
+def rellenar_por_contorno(res_wtrshd: np.ndarray):
+    #Rellena huecos internos usando el contorno externo de cada label
+    res_wtrshd_rellenado = res_wtrshd.copy()
+    unique_res_wtrshd = np.unique(res_wtrshd_rellenado)
+    unique_res_wtrshd = unique_res_wtrshd[unique_res_wtrshd != 0]
 
-    labels_rellenado = labels.copy()
-    unique_labels = np.unique(labels_rellenado)
-    unique_labels = unique_labels[unique_labels != 0]
-
-    for label in unique_labels:
-        mask_nucleo = (labels_rellenado == label).astype(np.uint8)
+    for label in unique_res_wtrshd:
+        # Máscara del núcleo actual
+        mask_nucleo = (res_wtrshd_rellenado == label).astype(np.uint8)
+        # Encontrar solo el contorno externo
         contours, _ = cv2.findContours(mask_nucleo, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not contours:
             continue
+        # Rellenar todo el interior del contorno (elimina huecos)
         mask_rellenado = np.zeros_like(mask_nucleo)
         cv2.drawContours(mask_rellenado, contours, -1, 1, cv2.FILLED)
-        labels_rellenado[mask_rellenado > 0] = label
+        res_wtrshd_rellenado[mask_rellenado > 0] = label
 
-    return labels_rellenado
+    return res_wtrshd_rellenado
 
 
-def crear_imagen_coloreada(labels: np.ndarray, imagen_original: np.ndarray) -> np.ndarray:
-    """Devuelve imagen coloreada por label (fondo negro)."""
+def crear_imagen_coloreada(res_wtrshd: np.ndarray, imagen_original: np.ndarray) -> np.ndarray:
+    #Devuelve imagen coloreada por label (fondo negro)
     imagen_coloreada = np.zeros_like(imagen_original)
-    unique_labels = np.unique(labels)
-    unique_labels = unique_labels[unique_labels != 0]
+    unique_res_wtrshd = np.unique(res_wtrshd)
+    unique_res_wtrshd = unique_res_wtrshd[unique_res_wtrshd != 0]
 
     np.random.seed(42)
-    for label_id in unique_labels:
+    for label_id in unique_res_wtrshd:
         color = np.random.randint(50, 255, 3).tolist()
-        imagen_coloreada[labels == label_id] = color
+        imagen_coloreada[res_wtrshd == label_id] = color
     return imagen_coloreada
 
 
-def guardar_resultados_compatible(nombre_imagen: str, imagen_original, imagen_gris, mask_binaria, imagen_distancia, imagen_coloreada, num_nucleos: int):
+def guardar_resultados(nombre_imagen: str, imagen_original, imagen_gris, mask_binaria, imagen_distancia, imagen_coloreada, num_nucleos: int):
     """Guarda imágenes intermedias y la coloreada en visualizaciones/<img>/"""
     base_name = os.path.splitext(nombre_imagen)[0]
     carpeta_imagen = Path(OUTPUT_DIR) / base_name
@@ -260,17 +266,17 @@ def procesar_todas_imagenes():
             #1) Cargar imagen
             imagen_original, imagen_gris = cargar_imagen(str(ruta))
             #2) Pipeline watershed
-            labels, mask, distance, info_filtro = pipeline_watershed(imagen_gris)
+            res_wtrshd, mask, distance, info_filtro = pipeline_watershed(imagen_gris)
             #3) Post-procesado
-            labels = unir_fragmentos(labels)
-            labels = rellenar_por_contorno(labels)
+            res_wtrshd = unir_fragmentos(res_wtrshd)
+            res_wtrshd = rellenar_por_contorno(res_wtrshd)
 
             #4) Resultados y guardado
-            imagen_coloreada = crear_imagen_coloreada(labels, imagen_original)
-            props = measure.regionprops(labels)
+            imagen_coloreada = crear_imagen_coloreada(res_wtrshd, imagen_original)
+            props = measure.regionprops(res_wtrshd)
             areas = [p.area for p in props]
 
-            guardar_resultados_compatible(
+            guardar_resultados(
                 ruta.name, imagen_original, imagen_gris, mask, distance, imagen_coloreada, len(areas)
             )
 
@@ -288,8 +294,6 @@ def procesar_todas_imagenes():
             print(f"ERROR: {e}")
 
     guardar_csv(resultados)
-    print("\nProceso completado. Ahora puedes ejecutar 'evaluar.py'.")
-
 
 if __name__ == "__main__":
     Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
