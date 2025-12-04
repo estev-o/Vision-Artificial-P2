@@ -1,7 +1,7 @@
 """
 Flujo:
 1) Cargar canal H en escala de grises.
-2) Umbral por imagen: Otsu si el histograma tiene 2 picos; Multi-Otsu (3 clases) si detecta mas de 3 picos (usa la clase más oscura).
+2) filtro por imagen: Otsu si el histograma tiene 2 picos; Multi-Otsu (3 clases) si detecta mas de 3 picos (usa la clase más oscura).
 3) Limpieza previa: elimina ruido (objetos pequeños), rellena huecos y erosiona ligeramente.
 4) EDT + suavizado -> picos locales como marcadores -> watershed sobre -EDT.
 5) Postprocesado opcional: fusionar fragmentos que comparten borde y rellenar contorno externo.
@@ -18,20 +18,18 @@ from scipy import ndimage
 from scipy.signal import find_peaks
 from skimage import feature, filters, measure, morphology, segmentation, util
 
-# Parámetros globales
-MIN_DISTANCE = 5            # Distancia mínima entre picos (controla sobre-segmentación)
+# Parametros globales
+MIN_DISTANCE = 5            # Distancia mínima entre picos
 AREA_MIN_NUCLEO = 50        # Filtro de ruido (px²)
 DIST_SMOOTH_SIGMA = 1.2     # Suavizado del mapa de distancia
 
-# Umbralización adaptativa por modas (Otsu/Multi-Otsu)
-DETECTAR_MODAS = True
+# filtroización adaptativa por modas (Otsu/Multi-Otsu)
 PROMINENCIA_MODAS = 0.001   # Sensibilidad para hallar picos
 DISTANCIA_MODAS = 5         # Separación mínima entre picos
 SIGMA_HIST = 1.5            # Suavizado del histograma
 
 # Post-procesado
-THRESHOLD_CONTACTO = 0.2    # Fusión si contacto > 20% del perímetro menor
-USAR_UNION_FRAGMENTOS = True
+THRESHOLD_CONTACTO = 0.2    # Fusión si contacto > 20% del perímetro
 USAR_RELLENO_CONTORNO = True
 
 # Directorios
@@ -41,7 +39,7 @@ RESULTADOS_CSV = "resultados.csv"
 
 
 def cargar_imagen(ruta_imagen: str):
-    """Lee la imagen H, retorna (BGR, gris)."""
+    #Lee la imagen H, devuelve (RGB y gris).
     imagen_color = cv2.imread(ruta_imagen)
     if imagen_color is None:
         raise FileNotFoundError(f"No se pudo leer la imagen: {ruta_imagen}")
@@ -50,12 +48,9 @@ def cargar_imagen(ruta_imagen: str):
 
 
 def detectar_modas_hist(imagen_gris: np.ndarray):
-    """Detecta nº de modas y devuelve (num_picos, umbral, metodo)."""
-    if not DETECTAR_MODAS:
-        umbral = filters.threshold_otsu(imagen_gris)
-        return 2, umbral, "otsu_forzado"
-
+    #Detecta nº de modas del histograma y devuelve (num_picos, filtro, metodo)
     hist, _ = np.histogram(imagen_gris, bins=256, range=(0, 255), density=True)
+    # Suavizado del histograma
     hist_smooth = ndimage.gaussian_filter1d(hist, sigma=SIGMA_HIST)
     peaks, _ = find_peaks(hist_smooth, prominence=PROMINENCIA_MODAS, distance=DISTANCIA_MODAS)
     num_picos = len(peaks)
@@ -63,11 +58,11 @@ def detectar_modas_hist(imagen_gris: np.ndarray):
     if num_picos >= 3:
         try:
             thresholds = filters.threshold_multiotsu(imagen_gris, classes=3)
-            umbral = thresholds[0]  # clase más oscura
+            umbral = thresholds[0]  # clase más oscura (la que nos interesa)
             metodo = "multiotsu_3clases"
         except Exception:
             umbral = filters.threshold_otsu(imagen_gris)
-            metodo = "multiotsu_fallback_otsu"
+            metodo = "otsu"
     else:
         umbral = filters.threshold_otsu(imagen_gris)
         metodo = "otsu"
@@ -75,41 +70,40 @@ def detectar_modas_hist(imagen_gris: np.ndarray):
     return num_picos, umbral, metodo
 
 
-def pipeline_watershed_distancia(imagen_gris: np.ndarray):
-    """Segmenta una imagen gris con watershed sobre EDT."""
+def pipeline_watershed(imagen_gris: np.ndarray):
+    #Segmenta una imagen gris con watershed 
     # 1) Umbral por modas
-    num_picos, thresh_val, metodo_umbral = detectar_modas_hist(imagen_gris)
-    mask = imagen_gris < thresh_val
+    num_picos, umbral, metodo_umbral = detectar_modas_hist(imagen_gris)
+    # Máscara binaria de la imagen de gris que pasa el umbral
+    mask = imagen_gris < umbral
 
     # 2) Limpieza previa (ruido y huecos)
     mask = morphology.remove_small_objects(mask, min_size=AREA_MIN_NUCLEO)
     mask = morphology.remove_small_holes(mask, area_threshold=50)
-    mask = cv2.erode(mask.astype(np.uint8), np.ones((2, 2), np.uint8), iterations=1) > 0
 
     # 3) Distancia + picos -> marcadores
     distance = ndimage.distance_transform_edt(mask)
     distance_smooth = ndimage.gaussian_filter(distance, sigma=DIST_SMOOTH_SIGMA)
     coords = feature.peak_local_max(distance_smooth, min_distance=MIN_DISTANCE, labels=mask)
 
+    # Máscara booleana con 1 píxel True por cada pico detectado (candidatos a semilla)
     mask_peaks = np.zeros(distance.shape, dtype=bool)
     if hasattr(coords, "size") and coords.size > 0:
         for (r, c) in np.atleast_2d(coords):
             mask_peaks[int(r), int(c)] = True
-
+    # Etiquetar cada pico con un ID entero distinto (marcadores para watershed)
     markers, _ = ndimage.label(mask_peaks)
 
     # 4) Watershed
     labels = segmentation.watershed(-distance, markers, mask=mask)
 
-    info = {"metodo": metodo_umbral, "umbral": float(thresh_val), "modas": num_picos}
+    info = {"metodo": metodo_umbral, "filtro": float(umbral), "modas": num_picos}
+    # labels: imagen segmentada mask: máscara binaria pre watershed distance: mapa de distancia info: info del filtro
     return labels, mask, distance, info
 
 
-def unir_fragmentos_inteligente(labels: np.ndarray):
-    """Fusiona núcleos que comparten borde significativo (contacto relativo > THRESHOLD_CONTACTO)."""
-    if not USAR_UNION_FRAGMENTOS:
-        return labels
-
+def unir_fragmentos(labels: np.ndarray):
+    #Fusiona núcleos que comparten borde significativo (contacto relativo > THRESHOLD_CONTACTO)
     labels_copia = labels.copy()
     kernel = np.ones((3, 3), np.uint8)
     unique_labels = np.unique(labels_copia)
@@ -251,7 +245,7 @@ def guardar_csv(resultados):
 
 
 def procesar_todas_imagenes():
-    """Orquesta la segmentación de todo el lote H y guarda imágenes/CSV."""
+    #hace la segmentación de todo el lote H y guarda imágenes/CSV.
     imagenes = sorted(Path(INPUT_DIR).glob("*.png"))
     if not imagenes:
         print(f"ERROR: No se encontraron imágenes en {INPUT_DIR}")
@@ -263,11 +257,15 @@ def procesar_todas_imagenes():
     for i, ruta in enumerate(imagenes, 1):
         print(f"[{i}/{len(imagenes)}] {ruta.name}...", end=" ", flush=True)
         try:
+            #1) Cargar imagen
             imagen_original, imagen_gris = cargar_imagen(str(ruta))
-            labels, mask, distance, info_umbral = pipeline_watershed_distancia(imagen_gris)
-            labels = unir_fragmentos_inteligente(labels)
+            #2) Pipeline watershed
+            labels, mask, distance, info_filtro = pipeline_watershed(imagen_gris)
+            #3) Post-procesado
+            labels = unir_fragmentos(labels)
             labels = rellenar_por_contorno(labels)
 
+            #4) Resultados y guardado
             imagen_coloreada = crear_imagen_coloreada(labels, imagen_original)
             props = measure.regionprops(labels)
             areas = [p.area for p in props]
@@ -284,7 +282,7 @@ def procesar_todas_imagenes():
                     "areas_individuales": areas,
                 }
             )
-            print(f"OK (umbral={info_umbral['metodo']} modas={info_umbral['modas']} thr={info_umbral['umbral']:.1f})")
+            print(f"OK (filtro={info_filtro['metodo']} modas={info_filtro['modas']} thr={info_filtro['filtro']:.1f})")
 
         except Exception as e:
             print(f"ERROR: {e}")
