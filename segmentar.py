@@ -70,7 +70,7 @@ def detectar_modas_hist(imagen_gris: np.ndarray):
 
 
 def pipeline_watershed(imagen_gris: np.ndarray):
-    #Segmenta una imagen gris con watershed 
+    # Segmenta una imagen gris con watershed
     # 1) Umbral por modas
     num_picos, umbral, metodo_umbral = detectar_modas_hist(imagen_gris)
     # Máscara binaria de la imagen de gris que pasa el umbral
@@ -79,11 +79,13 @@ def pipeline_watershed(imagen_gris: np.ndarray):
     # 2) Limpieza previa (ruido y huecos)
     mask = morphology.remove_small_objects(mask, min_size=AREA_MIN_NUCLEO)
     mask = morphology.remove_small_holes(mask, area_threshold=50)
+    mask = cv2.erode(mask.astype(np.uint8), np.ones((2, 2), np.uint8), iterations=1) > 0 #necesaria, si no el área se dispara
 
     # 3) Distancia + picos -> marcadores
     distance = ndimage.distance_transform_edt(mask)
     distance_smooth = ndimage.gaussian_filter(distance, sigma=DIST_SMOOTH_SIGMA)
-    coords = feature.peak_local_max(distance_smooth, min_distance=MIN_DISTANCE, res_wtrshd=mask)
+    # Picos locales en el mapa de distancia (semillas) limitados a la máscara
+    coords = feature.peak_local_max(distance_smooth, min_distance=MIN_DISTANCE, labels=mask)
 
     # Máscara booleana con 1 píxel True por cada pico detectado (candidatos a semilla)
     mask_peaks = np.zeros(distance.shape, dtype=bool)

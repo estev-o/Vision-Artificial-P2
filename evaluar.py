@@ -176,6 +176,7 @@ def evaluar_todas_imagenes():
             "tp",
             "fp",
             "fn",
+            "tn",
             "num_nucleos_gt",
             "num_nucleos_pred",
             "precision_conteo",
