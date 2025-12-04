@@ -3,7 +3,7 @@ Flujo:
 1) Cargar canal H en escala de grises.
 2) filtro por imagen: Otsu si el histograma tiene 2 picos; Multi-Otsu (3 clases) si detecta mas de 3 picos (usa la clase más oscura).
 3) Limpieza previa: elimina ruido (objetos pequeños), rellena huecos y erosiona ligeramente.
-4) EDT + suavizado -> picos locales como marcadores -> watershed sobre -EDT.
+4) picos locales como marcadores -> watershed
 5) Postprocesado opcional: fusionar fragmentos que comparten borde y rellenar contorno externo.
 6) Guardar pasos intermedios y CSV con conteos/áreas.
 """

@@ -4,8 +4,8 @@ Evaluación cuantitativa de segmentaciones (V3.3 final).
 Flujo por imagen:
 1) Carga predicción coloreada (`visualizaciones/<img>/4_coloreada.png`) y GT coloreado.
 2) Binariza ambos y ajusta tamaño si difiere.
-3) Calcula métricas píxel a píxel (F1/Dice, IoU, precisión, recall, accuracy).
-4) Obtiene conteo/áreas GT desde XML (si existe) y conteo pred por CC.
+3) Calcula métricas píxel a píxel (F1, IoU, precisión, recall, accuracy).
+4) Obtiene conteo/áreas GT desde XML y conteo pred por CC.
 5) Agrega métricas por imagen y genera `evaluacion.csv` con resumen global.
 """
 
@@ -24,11 +24,12 @@ OUTPUT_CSV = "evaluacion.csv"      # salida: métricas por imagen
 
 
 def cargar_ground_truth_xml(ruta_xml: Path):
-    """Devuelve (n_gt, lista_areas) desde el XML; si no existe, retorna (0, [])."""
+    #Devuelve (n_gt, lista_areas) desde el XML; si no existe, retorna (0, [])
     if not ruta_xml.exists():
         return 0, []
     try:
         tree = ET.parse(ruta_xml)
+        # Buscar todas las regiones (núcleos) en el XML
         regiones = tree.getroot().findall(".//Region")
         areas_gt = []
         for region in regiones:
@@ -42,21 +43,25 @@ def cargar_ground_truth_xml(ruta_xml: Path):
 
 
 def binarizar_imagen(imagen: np.ndarray) -> np.ndarray:
-    """Convierte imagen coloreada a binaria (255 núcleos / 0 fondo)."""
+    #Convierte imagen coloreada a binaria (255 núcleos / 0 fondo)
+    # Convertir a escala de grises si es necesario
     gray = cv2.cvtColor(imagen, cv2.COLOR_BGR2GRAY) if imagen.ndim == 3 else imagen
+    # Umbral: cualquier píxel >1 se considera núcleo (255), resto fondo (0)
     _, binaria = cv2.threshold(gray, 1, 255, cv2.THRESH_BINARY)
     return binaria
 
 
 def calcular_metricas_pixel(pred_binaria: np.ndarray, gt_binaria: np.ndarray) -> dict:
-    """Calcula F1(Dice), IoU, precision, recall, accuracy a nivel píxel."""
+    #Calcula F1(Dice), IoU, precision, recall, accuracy a nivel píxel
+    # Normalizar a 0 y 1
     pred = (pred_binaria > 0).astype(np.uint8)
     gt = (gt_binaria > 0).astype(np.uint8)
 
-    tp = np.sum((pred == 1) & (gt == 1))
-    fp = np.sum((pred == 1) & (gt == 0))
-    fn = np.sum((pred == 0) & (gt == 1))
-    tn = np.sum((pred == 0) & (gt == 0))
+    # Calcular matriz de confusión píxel a píxel
+    tp = np.sum((pred == 1) & (gt == 1))  # True Positives: detectado y es núcleo
+    fp = np.sum((pred == 1) & (gt == 0))  # False Positives: detectado pero es fondo
+    fn = np.sum((pred == 0) & (gt == 1))  # False Negatives: no detectado pero es núcleo
+    tn = np.sum((pred == 0) & (gt == 0))  # True Negatives: no detectado y es fondo
 
     precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
     recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
@@ -78,38 +83,46 @@ def calcular_metricas_pixel(pred_binaria: np.ndarray, gt_binaria: np.ndarray) ->
 
 
 def evaluar_imagen(nombre_imagen: str) -> dict | None:
-    """Evalúa una imagen; retorna dict de métricas o None si falta algún archivo."""
+    #Evalúa una imagen; retorna dict de métricas o None si falta algún archivo
     nombre_base = Path(nombre_imagen).stem
 
+    # 1) Cargar predicción (4_coloreada.png)
     ruta_pred = Path(OUTPUT_DIR) / nombre_base / "4_coloreada.png"
     if not ruta_pred.exists():
-        print(f"⚠️  No existe predicción para {nombre_imagen}")
+        print(f"No existe predicción para {nombre_imagen}")
         return None
     pred_color = cv2.imread(str(ruta_pred))
     pred_binaria = binarizar_imagen(pred_color)
 
+    # 2) Cargar ground truth coloreado
     ruta_gt = Path(GT_COLORS_DIR) / nombre_imagen
     if not ruta_gt.exists():
-        print(f"⚠️  No existe GT para {nombre_imagen}")
+        print(f"No existe GT para {nombre_imagen}")
         return None
     gt_color = cv2.imread(str(ruta_gt))
     gt_binaria = binarizar_imagen(gt_color)
 
+    # 3) Ajustar tamaño si difiere
     if pred_binaria.shape != gt_binaria.shape:
         pred_binaria = cv2.resize(pred_binaria, (gt_binaria.shape[1], gt_binaria.shape[0]))
 
+    # 4) Calcular métricas píxel a píxel
     metricas = calcular_metricas_pixel(pred_binaria, gt_binaria)
 
+    # 5) Obtener conteo GT desde XML
     ruta_xml = Path(XML_DIR) / f"{nombre_base}.xml"
     num_nucleos_gt, areas_gt = cargar_ground_truth_xml(ruta_xml)
 
+    # 6) Contar núcleos predichos (componentes conectadas)
     num_labels, _ = cv2.connectedComponents(pred_binaria)
-    num_nucleos_pred = max(num_labels - 1, 0)
+    num_nucleos_pred = max(num_labels - 1, 0)  # -1 porque label 0 es fondo
 
+    # 7) Calcular áreas medias
     area_total_gt = areas_gt if areas_gt else [np.sum(gt_binaria > 0)]
     area_media_gt = float(np.mean(area_total_gt)) if area_total_gt else 0.0
     area_media_pred = float(np.sum(pred_binaria > 0) / num_nucleos_pred) if num_nucleos_pred > 0 else 0.0
 
+    # 8) Precisión de conteo (% de acierto en número de núcleos)
     error_conteo_abs = abs(num_nucleos_pred - num_nucleos_gt)
     precision_conteo = 100 - (error_conteo_abs / num_nucleos_gt * 100) if num_nucleos_gt > 0 else 0.0
 
@@ -125,14 +138,17 @@ def evaluar_imagen(nombre_imagen: str) -> dict | None:
 
 
 def evaluar_todas_imagenes():
-    """Evalúa todas las imágenes listadas en resultados.csv y guarda evaluacion.csv."""
+    #Evalua todas las imágenes listadas en resultados.csv y guarda evaluacion.csv
+    # 1) Verificar que existe resultados.csv (generado por segmentar.py)
     if not Path(RESULTADOS_CSV).exists():
-        print(f"❌ No existe {RESULTADOS_CSV}. Ejecuta primero la segmentación.")
+        print(f"No existe {RESULTADOS_CSV}. Ejecuta primero la segmentación.")
         return
 
+    # 2) Leer lista de imágenes procesadas
     with open(RESULTADOS_CSV, "r") as f:
         imagenes = [row["Imagen"] for row in csv.DictReader(f)]
 
+    # 3) Evaluar cada imagen y acumular resultados
     print(f"Evaluando {len(imagenes)} imágenes...")
     resultados = []
     for i, nombre_imagen in enumerate(imagenes, 1):
@@ -140,14 +156,15 @@ def evaluar_todas_imagenes():
         resultado = evaluar_imagen(nombre_imagen)
         if resultado:
             resultados.append(resultado)
-            print(f"✓ F1: {resultado['f1']:.3f}")
+            print(f"F1: {resultado['f1']:.3f}")
         else:
-            print("✗")
+            print("No evaluado.")
 
     if not resultados:
-        print("❌ No se evaluó ninguna imagen correctamente.")
+        print("No se evaluó ninguna imagen correctamente.")
         return
 
+    # 4) Guardar CSV con métricas por imagen
     with open(OUTPUT_CSV, "w", newline="") as f:
         campos = [
             "nombre",
@@ -169,11 +186,13 @@ def evaluar_todas_imagenes():
         writer.writeheader()
         writer.writerows(resultados)
 
+    # 5) Mostrar resumen en consola
     mostrar_resumen(resultados)
 
 
 def mostrar_resumen(resultados: list[dict]):
-    """Imprime resumen global de las métricas."""
+    #Imprime resumen global de las métricas
+    # Calcular promedios de todas las métricas
     f1_medio = np.mean([r["f1"] for r in resultados])
     iou_medio = np.mean([r["iou"] for r in resultados])
     precision_medio = np.mean([r["precision"] for r in resultados])
@@ -204,6 +223,7 @@ def mostrar_resumen(resultados: list[dict]):
     if area_media_gt > 0:
         print(f"   Diferencia rel.: {abs(1 - area_media_pred/area_media_gt)*100:.1f}%")
 
+    # Identificar mejor y peor caso
     mejor = max(resultados, key=lambda x: x["f1"])
     peor = min(resultados, key=lambda x: x["f1"])
     print("\n" + "=" * 60)
